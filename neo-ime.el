@@ -40,7 +40,17 @@
 (defvar neo-ime--frames nil "Attached frames and last seen snapshot revisions.")
 (defvar neo-ime--timer nil)
 (defvar neo-ime--overlay nil)
-(defvar neo-ime--owner nil "Frame owning the current preedit overlay.")
+(defvar neo-ime--owner nil "Frame owning the current preedit text.")
+
+(defmacro neo-ime--temporary-edit (&rest body)
+  "Run BODY without recording preedit edits or marking the buffer modified."
+  (declare (indent 0) (debug t))
+  `(let ((buffer-undo-list t)
+         (inhibit-modification-hooks t)
+         (deactivate-mark nil)
+         (modified (buffer-modified-p)))
+     (unwind-protect (progn ,@body)
+       (restore-buffer-modified-p modified))))
 
 (defun neo-ime--hwnd (frame)
   "Return FRAME's native window handle."
@@ -56,8 +66,20 @@
     index))
 
 (defun neo-ime--clear ()
-  "Remove only our composition display."
-  (when (overlayp neo-ime--overlay) (delete-overlay neo-ime--overlay))
+  "Remove temporary preedit text without adding Undo history."
+  (when (and (overlayp neo-ime--overlay) (overlay-buffer neo-ime--overlay))
+    (with-current-buffer (overlay-buffer neo-ime--overlay)
+      (save-restriction
+        (widen)
+        (let ((start (overlay-start neo-ime--overlay))
+              (end (overlay-end neo-ime--overlay))
+              (window (overlay-get neo-ime--overlay 'window)))
+          (let ((inhibit-read-only t))
+            (neo-ime--temporary-edit (delete-region start end)))
+          (when (and (window-live-p window)
+                     (eq (window-buffer window) (current-buffer)))
+            (set-window-point window start)))))
+    (delete-overlay neo-ime--overlay))
   (setq neo-ime--overlay nil neo-ime--owner nil))
 
 (defun neo-ime--display (window text cursor attributes)
@@ -69,20 +91,35 @@
     (setq neo-ime--overlay
           (make-overlay (window-point window) (window-point window)
                         (window-buffer window))))
-  (let* ((position (neo-ime--character-offset text cursor))
-         (display (propertize (if (= position (length text)) (concat text " ") text)
-                              'face 'neo-ime-preedit))
-         (unit 0))
-    (dotimes (index (length text))
-      (when (and (< unit (length attributes))
-                 (memq (aref attributes unit) '(1 3)))
-        (put-text-property index (1+ index) 'face 'neo-ime-target display))
-      (setq unit (+ unit (if (> (aref text index) #xffff) 2 1))))
-    (put-text-property position (1+ position) 'cursor t display)
-    (overlay-put neo-ime--overlay 'window window)
-    (overlay-put neo-ime--overlay 'priority 1000)
-    (overlay-put neo-ime--overlay 'before-string display)
-    (setq neo-ime--owner (window-frame window))))
+  (with-current-buffer (window-buffer window)
+    (let ((start (overlay-start neo-ime--overlay))
+          (end (overlay-end neo-ime--overlay))
+          (unit 0))
+      (neo-ime--temporary-edit
+        ;; Cursor and attribute changes should not delete/reinsert the text.
+        (unless (equal (buffer-substring-no-properties start end) text)
+          (goto-char start)
+          (delete-region start end)
+          (insert text)
+          (move-overlay neo-ime--overlay start (+ start (length text))))
+        (put-text-property start (+ start (length text)) 'face 'neo-ime-preedit)
+        (dotimes (index (length text))
+          (when (and (< unit (length attributes))
+                     (memq (aref attributes unit) '(1 3)))
+            (put-text-property (+ start index) (+ start index 1)
+                               'face 'neo-ime-target))
+          (setq unit (+ unit (if (> (aref text index) #xffff) 2 1)))))
+      (set-window-point window (+ start (neo-ime--character-offset text cursor)))
+      (overlay-put neo-ime--overlay 'window window)
+      (setq neo-ime--owner (window-frame window)))))
+
+(defun neo-ime--before-save ()
+  "Cancel preedit before manual or automatic saving."
+  ;; auto-save-hook is global and can run with a different current buffer.
+  (when neo-ime--owner
+    (when (frame-live-p neo-ime--owner)
+      (neo-ime-native-cancel (neo-ime--hwnd neo-ime--owner)))
+    (neo-ime--clear)))
 
 (defun neo-ime--position (frame)
   "Update FRAME's candidate anchor from its selected window."
@@ -151,6 +188,8 @@
   (remove-hook 'pre-command-hook #'neo-ime--before-command)
   (remove-hook 'post-command-hook #'neo-ime--after-command)
   (remove-hook 'kill-emacs-hook #'neo-ime--stop)
+  (remove-hook 'before-save-hook #'neo-ime--before-save)
+  (remove-hook 'auto-save-hook #'neo-ime--before-save)
   (dolist (entry (copy-sequence neo-ime--frames))
     (neo-ime--detach (car entry)))
   (neo-ime--clear))
@@ -176,6 +215,8 @@ It does not select an IME or change `default-input-method'."
           (add-hook 'pre-command-hook #'neo-ime--before-command)
           (add-hook 'post-command-hook #'neo-ime--after-command)
           (add-hook 'kill-emacs-hook #'neo-ime--stop)
+          (add-hook 'before-save-hook #'neo-ime--before-save)
+          (add-hook 'auto-save-hook #'neo-ime--before-save)
           (unless (timerp neo-ime--timer)
             ;; ponytail: poll snapshots at 50 Hz; native event transport if latency matters.
             (setq neo-ime--timer (run-at-time 0 neo-ime-poll-interval #'neo-ime--poll))))

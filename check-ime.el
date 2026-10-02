@@ -1,60 +1,90 @@
-;;; check-ime.el --- Inline IME regression checks -*- lexical-binding: t; -*-
-;; emacs -Q --batch -l check-ime.el
+;;; check-ime.el --- Buffer preedit regression checks -*- lexical-binding: t; -*-
 (require 'cl-lib)
 (add-to-list 'load-path (file-name-directory load-file-name))
 (require 'neo-ime)
 
-;; Preedit must never change the buffer, its modified flag or undo history.
 (with-temp-buffer
   (switch-to-buffer (current-buffer))
+  (buffer-enable-undo)
   (insert "before after")
   (goto-char 8)
   (set-buffer-modified-p nil)
   (let ((undo buffer-undo-list))
     (neo-ime--display (selected-window) "にほんご" 2 [0 0 1 1])
-    (cl-assert (equal (buffer-string) "before after"))
+    (cl-assert (equal (buffer-substring-no-properties (point-min) (point-max)) "before にほんごafter"))
+    (cl-assert (= (point) 10))
     (cl-assert (not (buffer-modified-p)))
     (cl-assert (equal undo buffer-undo-list))
-    (cl-assert (= (overlay-start neo-ime--overlay) 8))
-    (let ((text (overlay-get neo-ime--overlay 'before-string)))
-      (cl-assert (equal (substring-no-properties text) "にほんご"))
-      (cl-assert (eq (get-text-property 2 'cursor text) t))
-      (cl-assert (eq (get-text-property 2 'face text) 'neo-ime-target))
-      (cl-assert (eq (face-attribute 'neo-ime-preedit :background) 'unspecified) nil
-                 "Preedit must not force a background"))
-    ;; Updating preedit must not leave multiple overlays.
+    (cl-assert (eq (get-text-property 10 'face) 'neo-ime-target))
+    (cl-assert (eq (face-attribute 'neo-ime-preedit :background) 'unspecified))
+    ;; Cursor-only updates must not replace the underlying characters.
+    (let ((tick (buffer-chars-modified-tick)))
+      (neo-ime--display (selected-window) "にほんご" 1 [0 0 1 1])
+      (cl-assert (= tick (buffer-chars-modified-tick))))
     (neo-ime--display (selected-window) "日本語" 3 [1 1 0])
-    (cl-assert (= (length (overlays-in (point-min) (point-max))) 1))
+    (cl-assert (equal (buffer-substring-no-properties (point-min) (point-max)) "before 日本語after"))
+    (cl-assert (equal undo buffer-undo-list))
     (neo-ime--clear)
-    (cl-assert (null neo-ime--overlay))
-    (cl-assert (null (overlays-in (point-min) (point-max))))))
+    (cl-assert (equal (buffer-string) "before after"))
+    (cl-assert (= (point) 8))
+    (cl-assert (not (buffer-modified-p)))
+    (cl-assert (equal undo buffer-undo-list))))
 
-;; IMM cursor/attribute offsets are UTF-16, Emacs positions are characters.
 (cl-assert (= (neo-ime--character-offset "あ😀い" 3) 2))
 (cl-assert (= (neo-ime--character-offset "あ😀い" 99) 3))
 (cl-assert (= (neo-ime--character-offset "あ😀い" -1) 0))
 (with-temp-buffer
   (switch-to-buffer (current-buffer))
   (neo-ime--display (selected-window) "あ😀い" 3 [0 1 1 0])
-  (cl-assert (eq (get-text-property 1 'face
-                                   (overlay-get neo-ime--overlay 'before-string))
-                 'neo-ime-target))
+  (cl-assert (= (point) 3))
+  (cl-assert (eq (get-text-property 2 'face) 'neo-ime-target))
   (neo-ime--clear))
 
-;; A native partial commit is a self-insert command in Emacs.  Cancelling it
-;; would discard the next unconfirmed clause from the IME.
+;; Confirmed text alone must survive and form a real Undo/Redo edit.
 (with-temp-buffer
   (switch-to-buffer (current-buffer))
+  (buffer-enable-undo)
+  (insert "prefix:")
+  (setq buffer-undo-list nil)
+  (set-buffer-modified-p nil)
   (let ((cancelled nil)
         (neo-ime--frames (list (cons (selected-frame) 10))))
     (cl-letf (((symbol-function 'neo-ime-native-cancel)
                (lambda (_) (setq cancelled t))))
-      (neo-ime--display (selected-window) "次" 0 [0])
-      (let ((this-command 'self-insert-command)) (neo-ime--before-command))
+      (neo-ime--display (selected-window) "にほん" 2 [0 0 0])
+      (let ((this-command 'self-insert-command) (last-command-event ?日))
+        (neo-ime--before-command)
+        (self-insert-command 1))
+      (let ((this-command 'self-insert-command) (last-command-event ?本))
+        (neo-ime--before-command)
+        (self-insert-command 1))
       (cl-assert (not cancelled))
-      (cl-assert (= (cdar neo-ime--frames) -1))
-      (neo-ime--display (selected-window) "次" 0 [0])
-      (let ((this-command 'switch-to-buffer)) (neo-ime--before-command))
+      (cl-assert (equal (buffer-string) "prefix:日本"))
+      (cl-assert (buffer-modified-p))
+      (undo-boundary)
+      (undo-only 1)
+      (cl-assert (equal (buffer-string) "prefix:"))
+      (cl-assert (not (buffer-modified-p)))
+      (let ((last-command 'undo)) (undo-redo 1))
+      (cl-assert (equal (buffer-string) "prefix:日本"))
+      ;; Partial commit followed by a new clause, then cancel/save.
+      (neo-ime--display (selected-window) "語" 1 [0])
+      (with-temp-buffer (neo-ime--before-save))
       (cl-assert cancelled)
-      (cl-assert (not neo-ime--overlay)))))
-(princ "NEO_IME_EL=PASS buffer-preserved theme-inherited utf16 cleanup\n")
+      (cl-assert (equal (buffer-string) "prefix:日本")))))
+
+(with-temp-buffer
+  (switch-to-buffer (current-buffer))
+  (insert "modified")
+  (neo-ime--display (selected-window) "次" 0 [0])
+  (neo-ime--clear)
+  (cl-assert (buffer-modified-p)))
+
+;; Cleanup must work even when a buffer becomes read-only during composition.
+(with-temp-buffer
+  (switch-to-buffer (current-buffer))
+  (neo-ime--display (selected-window) "次" 0 [0])
+  (setq buffer-read-only t)
+  (neo-ime--clear)
+  (cl-assert (equal (buffer-string) "")))
+(princ "NEO_IME_EL=PASS buffer-preedit undo-redo cancel modified utf16 stable-text\n")
