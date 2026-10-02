@@ -2,6 +2,7 @@
 ;; Run in a separate GUI Emacs: emacs -Q -l check-ime-gui.el
 (require 'cl-lib)
 (require 'package)
+(defvar neo-ime-candidate-backend)
 (defconst neo-ime-check-root (file-name-directory load-file-name))
 (setq native-comp-jit-compilation nil)
 (defun neo-ime-gui-check ()
@@ -13,7 +14,7 @@
   (unwind-protect
       (progn
         (package-initialize)
-        (package-install-file (expand-file-name "var/neo-ime-0.1.3.tar" neo-ime-check-root))
+        (package-install-file (expand-file-name "var/neo-ime-0.1.4.tar" neo-ime-check-root))
         (require 'neo-ime)
         (cl-assert (file-in-directory-p (locate-library "neo-ime") package-user-dir))
         (cl-assert (file-exists-p neo-ime-native-file))
@@ -27,6 +28,9 @@
           (cl-assert (not (aref snapshot 4))))
         (neo-ime-native-cancel (neo-ime--hwnd frame))
         (neo-ime--poll)
+        ;; Synthetic rendering snapshots must not race live native polling.
+        (cancel-timer neo-ime--timer)
+        (setq neo-ime--timer nil)
         (neo-ime--display (frame-selected-window frame) "亜" 1 [1])
         (redisplay t)
         (neo-ime--show-candidates frame [1 "亜" 1 [1] t ["あ" "亜" "😀"] 1 0 100])
@@ -38,6 +42,39 @@
           (cl-assert (eq popup neo-ime--candidate-frame)))
         (neo-ime--clear)
         (cl-assert (not (frame-visible-p neo-ime--candidate-frame)))
+        ;; Optional real Corfu renderer check: add Corfu/compat to load-path
+        ;; and set NEO_IME_CHECK_CORFU=1; no mandatory package dependency.
+        (when (getenv "NEO_IME_CHECK_CORFU")
+          (require 'corfu)
+          (make-frame-visible frame)
+          (let ((neo-ime-candidate-backend 'corfu))
+            (with-current-buffer (window-buffer (frame-selected-window frame))
+              (corfu-mode 1)
+              (insert "a")
+              (completion-in-region (1- (point)) (point) '("abc" "abd"))
+              (cl-assert completion-in-region-mode))
+            (neo-ime--display (frame-selected-window frame) "亜" 1 [1])
+            (cl-assert (not completion-in-region-mode))
+            (redisplay t)
+            (neo-ime--show-candidates frame [3 "亜" 1 [1] t ["あ" "亜" "😀"] 1 0 100])
+            (redisplay t)
+            (cl-assert neo-ime--corfu-visible)
+            (cl-assert (frame-live-p (symbol-value 'corfu--frame)))
+            (cl-assert (frame-visible-p (symbol-value 'corfu--frame)))
+            (cl-assert (not (assq (symbol-value 'corfu--frame) neo-ime--frames)))
+            (cl-assert (not (frame-visible-p neo-ime--candidate-frame)))
+            (with-current-buffer " *corfu*"
+              (cl-assert (string-match-p "2  亜" (buffer-string)))
+              (goto-char (point-min)) (forward-line 1)
+              (let ((face (get-text-property (point) 'face)))
+                (cl-assert (or (eq face 'corfu-current)
+                               (and (listp face) (memq 'corfu-current face))))))
+            (neo-ime--clear)
+            (sit-for 0.2)
+            (with-current-buffer (window-buffer (frame-selected-window frame))
+              (corfu-mode -1))
+            (cl-assert (not neo-ime--corfu-visible))
+            (cl-assert (not (frame-visible-p (symbol-value 'corfu--frame))))))
         (neo-ime-mode 1)
         (cl-assert (= (length neo-ime--frames)
                       (length (cl-remove-if-not
@@ -55,7 +92,8 @@
           (cl-assert (not (assq second neo-ime--frames))))
         (neo-ime-mode -1)
         (with-temp-file (expand-file-name "var/check-ime-gui.log" neo-ime-check-root)
-          (insert "NEO_IME_GUI=PASS clean-package-install real-w32-frames enable-disable-reenable\n")))
+          (insert (format "NEO_IME_GUI=PASS clean-package-install real-w32-frames enable-disable-reenable corfu=%s\n"
+                          (if (getenv "NEO_IME_CHECK_CORFU") "tested" "skipped")))))
     (when (fboundp 'neo-ime-mode) (neo-ime-mode -1))
     (when (frame-live-p frame) (delete-frame frame t)))))
 

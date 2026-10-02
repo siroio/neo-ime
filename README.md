@@ -51,7 +51,7 @@ git clone https://github.com/siroio/neo-ime.git
     (neo-ime-mode 1)))
 ```
 
-tar形式で導入する場合は `build-ime.ps1` が生成する `var/neo-ime-0.1.3.tar` を
+tar形式で導入する場合は `build-ime.ps1` が生成する `var/neo-ime-0.1.4.tar` を
 `M-x package-install-file` で選び、上の宣言の `:vc` / `:load-path` を省いてください。
 このリポジトリはMELPAなどのパッケージアーカイブには登録していません。
 
@@ -63,6 +63,23 @@ IME情報を取得できない場合は、その変換中だけWindows標準表�
 表示は `neo-ime-preedit` / `neo-ime-target` のfaceで調整できます。
 候補窓は親フレームのフォント・配色を使い、選択行は `highlight` faceで表示します。
 候補窓は入力フォーカスを取らず、確定・取消・フォーカス解除で閉じます。
+候補の表示先は `neo-ime-candidate-backend` で明示的に選べます。
+既定は `child-frame` です。Corfuを導入済みなら、以下でCorfuの候補窓を使えます。
+
+```elisp
+(use-package neo-ime
+  :demand t
+  :custom (neo-ime-candidate-backend 'corfu)
+  :hook (window-setup . (lambda () (neo-ime-mode 1)))
+  :config
+  (when (and (not noninteractive) after-init-time)
+    (neo-ime-mode 1)))
+```
+
+Corfuの自動検出・自動導入は行いません。`corfu` を指定したときだけ読み込み、
+未導入なら有効化時にエラーを表示します。`corfu-mode` の有効化は不要です。
+Corfuは表示に使い、候補順・選択・ページ切り替え・確定はWindows IMEが処理します。
+Corfuの内部描画APIを使うため、Corfuの更新で互換性が変わる可能性があります。
 `neo-ime-poll-interval` は初期値0.02秒です。変更後はmodeを再起動してください。
 
 ## ビルド
@@ -73,7 +90,7 @@ EmacsとMinGWのgccをPATHに用意し、リポジトリのルートで実行し
 .\build-ime.ps1
 ```
 
-DLLと、DLL・Lisp・nativeソース・手順・ライセンスを含む `var/neo-ime-0.1.3.tar` を生成します。
+DLLと、DLL・Lisp・nativeソース・手順・ライセンスを含む `var/neo-ime-0.1.4.tar` を生成します。
 Emacsヘッダーの場所はEmacs自身から検出します。
 検出を上書きする場合は `-EmacsRoot 'C:/path/to/emacs'` を指定してください。
 DLLをロード済みなら、再ビルド前にそのEmacsを終了してください。
@@ -98,11 +115,14 @@ GUI検証は専用のEmacsプロセスを起動して自動終了します。
 - 実Windowsウィンドウの別スレッドへのattach/detach、フォーカス解除、破棄。
 - 合成したIMMデータでの部分確定・取得失敗時の標準表示復帰。
 - 候補データのオフセット・終端・件数の検証、ページ表示・選択行、候補子フレームの再利用と解除。
+- 明示的なCorfu切り替え、候補順・選択行・解除とUndoの保持。
 - 新しい一時環境へのパッケージ導入、DLL読み込み、GUIフレームでの有効化・無効化・再有効化。
 
 Windows x64 / Emacs 31.1で上記の検証を実行しています。
 Google日本語入力による実入力・変換、白い未確定文字窓の抑止、自前候補一覧を確認済みです。
 100件の候補取得・次ページの表示・選択行の更新・Enter確定・確定後の一回のUndoを実GUIで検証しました。
+0.1.4では導入済みCorfuの実描画APIによる候補表示・選択行・非表示もGUI検証しています。
+CorfuのGUI検証は `NEO_IME_CHECK_CORFU=1` を設定し、Corfuをload-pathに追加して `check-ime-gui.el` を実行します。
 IMM32互換の入力経路を使い、TSF専用の統合は実装していません。
 候補はキーボードで選択します。候補のマウス選択は実装していません。
 

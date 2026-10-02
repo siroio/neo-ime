@@ -1,5 +1,5 @@
 ;;; neo-ime.el --- Inline Windows IME composition -*- lexical-binding: t; -*-
-;; Version: 0.1.3
+;; Version: 0.1.4
 ;; Author: SIRO
 ;; URL: https://github.com/siroio/neo-ime
 ;; Package-Requires: ((emacs "29.1"))
@@ -25,6 +25,13 @@
 (defcustom neo-ime-poll-interval 0.02
   "Seconds between native composition snapshots.  Restart the mode to apply."
   :type 'number :group 'neo-ime)
+(defcustom neo-ime-candidate-backend 'child-frame
+  "Candidate display backend, selected explicitly without auto-detection.
+`child-frame' uses neo-ime's popup.  `corfu' requires an installed Corfu
+and uses its popup renderer only; the IME still selects and commits text."
+  :type '(choice (const :tag "neo-ime child frame" child-frame)
+                 (const :tag "Corfu popup" corfu))
+  :group 'neo-ime)
 (defcustom neo-ime-native-file
   (expand-file-name "neo-ime-native.dll"
                     (file-name-directory (or load-file-name buffer-file-name)))
@@ -36,17 +43,60 @@
 (declare-function neo-ime-native-snapshot "neo-ime-native" (hwnd))
 (declare-function neo-ime-native-position "neo-ime-native" (hwnd x y height))
 (declare-function neo-ime-native-cancel "neo-ime-native" (hwnd))
+(declare-function corfu--popup-show "corfu" (pos off width lines &optional curr lo bar))
+(declare-function corfu--popup-hide "corfu" ())
+(defvar corfu-min-width)
+(defvar corfu-max-width)
 
 (defvar neo-ime--frames nil "Attached frames and last seen snapshot revisions.")
 (defvar neo-ime--timer nil)
 (defvar neo-ime--overlay nil)
 (defvar neo-ime--owner nil "Frame owning the current preedit text.")
 (defvar neo-ime--candidate-frame nil)
+(defvar neo-ime--corfu-visible nil)
+
+(defun neo-ime--require-corfu ()
+  "Load the explicitly requested Corfu popup backend."
+  (unless (and (require 'corfu nil t)
+               (fboundp 'corfu--popup-show) (fboundp 'corfu--popup-hide))
+    (user-error "neo-ime: install Corfu to use the corfu candidate backend")))
 
 (defun neo-ime--hide-candidates ()
   "Hide the reusable candidate frame."
   (when (frame-live-p neo-ime--candidate-frame)
-    (make-frame-invisible neo-ime--candidate-frame)))
+    (make-frame-invisible neo-ime--candidate-frame))
+  (when neo-ime--corfu-visible
+    (setq neo-ime--corfu-visible nil)
+    (corfu--popup-hide)))
+
+(defun neo-ime--show-candidates (frame state)
+  "Display STATE using the explicitly selected backend in FRAME."
+  (if (or (< (length state) 9) (= (length (aref state 5)) 0)
+          (not (eq frame neo-ime--owner)))
+      (neo-ime--hide-candidates)
+    (pcase neo-ime-candidate-backend
+      ('child-frame
+       (when neo-ime--corfu-visible (neo-ime--hide-candidates))
+       (neo-ime--show-child-candidates frame state))
+      ('corfu
+       (neo-ime--require-corfu)
+       (when (frame-live-p neo-ime--candidate-frame)
+         (make-frame-invisible neo-ime--candidate-frame))
+       (with-selected-window (overlay-get neo-ime--overlay 'window)
+         (when-let* ((position (posn-at-point (overlay-start neo-ime--overlay)))
+                     (candidates (aref state 5)))
+           (let* ((lines (append
+                          (cl-loop for text across candidates for index from 1
+                                   collect (format "%d  %s" index text))
+                          (list (format "%d / %d" (1+ (aref state 6)) (aref state 8)))))
+                  (width (min corfu-max-width
+                              (max corfu-min-width (apply #'max (mapcar #'string-width lines))))))
+             ;; Corfu has no public rendering API; keep the private API use here.
+             (setq neo-ime--corfu-visible t)
+             (corfu--popup-show position 0 width
+                                (mapcar (lambda (line) (truncate-string-to-width line width)) lines)
+                                (- (aref state 6) (aref state 7)))))))
+      (_ (user-error "Invalid neo-ime-candidate-backend: %S" neo-ime-candidate-backend)))))
 
 (defun neo-ime--candidate-text (candidates selection start total)
   "Format CANDIDATES, highlighting absolute SELECTION in the current page."
@@ -59,7 +109,7 @@
     (number-sequence 0 (1- (length candidates))) "\n")
    (format "\n %d / %d " (1+ selection) total)))
 
-(defun neo-ime--show-candidates (frame state)
+(defun neo-ime--show-child-candidates (frame state)
   "Draw STATE's candidate page below preedit in FRAME."
   (if (or (< (length state) 9) (= (length (aref state 5)) 0)
           (not (eq frame neo-ime--owner)))
@@ -157,6 +207,10 @@
   (unless (and (overlayp neo-ime--overlay)
                (eq (overlay-buffer neo-ime--overlay) (window-buffer window))
                (eq (overlay-get neo-ime--overlay 'window) window))
+    ;; Close a normal completion session before temporary IME text is inserted.
+    (when (and (eq neo-ime-candidate-backend 'corfu)
+               (bound-and-true-p completion-in-region-mode))
+      (completion-in-region-mode -1))
     (neo-ime--clear)
     (setq neo-ime--overlay
           (make-overlay (window-point window) (window-point window)
@@ -290,6 +344,10 @@ It does not select an IME or change `default-input-method'."
             (user-error "neo-ime needs native Windows Emacs with module support"))
           (unless (and (numberp neo-ime-poll-interval) (>= neo-ime-poll-interval 0.005))
             (user-error "neo-ime-poll-interval must be at least 0.005 seconds"))
+          (pcase neo-ime-candidate-backend
+            ('corfu (neo-ime--require-corfu))
+            ('child-frame nil)
+            (_ (user-error "Invalid neo-ime-candidate-backend: %S" neo-ime-candidate-backend)))
           (unless (featurep 'neo-ime-native) (module-load neo-ime-native-file))
           (dolist (frame (frame-list)) (neo-ime--attach frame))
           (add-hook 'after-make-frame-functions #'neo-ime--attach)
