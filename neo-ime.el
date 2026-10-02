@@ -1,5 +1,5 @@
 ;;; neo-ime.el --- Inline Windows IME composition -*- lexical-binding: t; -*-
-;; Version: 0.1.0
+;; Version: 0.1.3
 ;; Author: SIRO
 ;; URL: https://github.com/siroio/neo-ime
 ;; Package-Requires: ((emacs "29.1"))
@@ -10,7 +10,7 @@
 ;; Display Windows IME preedit using the buffer's colors.  Requires the
 ;; companion neo-ime-native.dll; no Emacs patch or alternative IME is used.
 ;; Put this file and the DLL on load-path, then (neo-ime-mode 1).
-;; The native candidate list and Emacs's normal commit path are preserved.
+;; Candidates are drawn in an Emacs child frame; commits use Emacs's normal path.
 
 ;;; Code:
 (require 'cl-lib)
@@ -41,6 +41,75 @@
 (defvar neo-ime--timer nil)
 (defvar neo-ime--overlay nil)
 (defvar neo-ime--owner nil "Frame owning the current preedit text.")
+(defvar neo-ime--candidate-frame nil)
+
+(defun neo-ime--hide-candidates ()
+  "Hide the reusable candidate frame."
+  (when (frame-live-p neo-ime--candidate-frame)
+    (make-frame-invisible neo-ime--candidate-frame)))
+
+(defun neo-ime--candidate-text (candidates selection start total)
+  "Format CANDIDATES, highlighting absolute SELECTION in the current page."
+  (concat
+   (mapconcat
+    (lambda (index)
+      (let ((row (format " %d  %s " (1+ index) (aref candidates index))))
+        (if (= (+ start index) selection)
+            (propertize row 'face 'highlight) row)))
+    (number-sequence 0 (1- (length candidates))) "\n")
+   (format "\n %d / %d " (1+ selection) total)))
+
+(defun neo-ime--show-candidates (frame state)
+  "Draw STATE's candidate page below preedit in FRAME."
+  (if (or (< (length state) 9) (= (length (aref state 5)) 0)
+          (not (eq frame neo-ime--owner)))
+      (neo-ime--hide-candidates)
+    (let* ((window (overlay-get neo-ime--overlay 'window))
+           (position (posn-at-point (overlay-start neo-ime--overlay) window))
+           (text (neo-ime--candidate-text (aref state 5) (aref state 6)
+                                          (aref state 7) (aref state 8)))
+           (buffer (get-buffer-create " *neo-ime candidates*")))
+      (when position
+        (unless (and (frame-live-p neo-ime--candidate-frame)
+                     (eq (frame-parent neo-ime--candidate-frame) frame))
+          (when (frame-live-p neo-ime--candidate-frame)
+            (delete-frame neo-ime--candidate-frame t))
+          (setq neo-ime--candidate-frame
+                (make-frame `((parent-frame . ,frame) (minibuffer . nil)
+                              (name . "neo-ime candidates") (visibility . nil)
+                              (no-accept-focus . t) (no-focus-on-map . t)
+                              (undecorated . t) (skip-taskbar . t)
+                              (no-other-frame . t) (desktop-dont-save . t)
+                              (font . ,(frame-parameter frame 'font))
+                              (foreground-color . ,(frame-parameter frame 'foreground-color))
+                              (background-color . ,(frame-parameter frame 'background-color))
+                              (internal-border-width . 2)
+                              (menu-bar-lines . 0) (tool-bar-lines . 0)
+                              (vertical-scroll-bars . nil) (horizontal-scroll-bars . nil)
+                              (cursor-type . nil)))))
+        (with-current-buffer buffer
+          (setq-local mode-line-format nil header-line-format nil
+                      cursor-type nil buffer-undo-list t truncate-lines t)
+          (let ((inhibit-read-only t))
+            (unless (equal-including-properties (buffer-string) text)
+              (erase-buffer) (insert text)))
+          (setq buffer-read-only t))
+        (set-window-buffer (frame-root-window neo-ime--candidate-frame) buffer)
+        (let* ((xy (posn-x-y position)) (edges (window-inside-pixel-edges window))
+               (width (apply #'max (mapcar #'string-width (split-string text "\n"))))
+               (height (1+ (length (aref state 5))))
+               (x (+ (car edges) (car xy)))
+               (y (+ (cadr edges) (cdr xy) (frame-char-height frame))))
+          (set-frame-size neo-ime--candidate-frame (max 8 width) height)
+          (when (> (+ y (frame-pixel-height neo-ime--candidate-frame))
+                   (frame-pixel-height frame))
+            (setq y (- y (frame-char-height frame)
+                       (frame-pixel-height neo-ime--candidate-frame))))
+          (set-frame-position neo-ime--candidate-frame
+                              (max 0 (min x (- (frame-pixel-width frame)
+                                               (frame-pixel-width neo-ime--candidate-frame))))
+                              (max 0 y)))
+        (make-frame-visible neo-ime--candidate-frame)))))
 
 (defmacro neo-ime--temporary-edit (&rest body)
   "Run BODY without recording preedit edits or marking the buffer modified."
@@ -67,6 +136,7 @@
 
 (defun neo-ime--clear ()
   "Remove temporary preedit text without adding Undo history."
+  (neo-ime--hide-candidates)
   (when (and (overlayp neo-ime--overlay) (overlay-buffer neo-ime--overlay))
     (with-current-buffer (overlay-buffer neo-ime--overlay)
       (save-restriction
@@ -134,7 +204,8 @@
 
 (defun neo-ime--attach (frame)
   "Attach a Windows GUI FRAME once."
-  (when (and (eq (window-system frame) 'w32) (not (assq frame neo-ime--frames)))
+  (when (and (eq (window-system frame) 'w32) (not (frame-parent frame))
+             (not (assq frame neo-ime--frames)))
     (neo-ime-native-attach (neo-ime--hwnd frame))
     (push (cons frame -1) neo-ime--frames)
     (neo-ime--position frame)))
@@ -167,8 +238,15 @@
           (when (and state (/= (aref state 0) (cdr entry)))
             (setcdr entry (aref state 0))
             (if (and (aref state 4) (not (string-empty-p (aref state 1))))
-                (neo-ime--display (frame-selected-window frame)
-                                  (aref state 1) (aref state 2) (aref state 3))
+                (condition-case nil
+                    (progn
+                      (neo-ime--display (frame-selected-window frame)
+                                        (aref state 1) (aref state 2) (aref state 3))
+                      (neo-ime--show-candidates frame state))
+                  (buffer-read-only
+                   ;; Read-only views must not disable IME in every frame.
+                   (neo-ime-native-cancel (neo-ime--hwnd frame))
+                   (neo-ime--clear)))
               (when (eq frame neo-ime--owner) (neo-ime--clear))))))
     (error
      (neo-ime-mode -1)
@@ -192,11 +270,15 @@
   (remove-hook 'auto-save-hook #'neo-ime--before-save)
   (dolist (entry (copy-sequence neo-ime--frames))
     (neo-ime--detach (car entry)))
-  (neo-ime--clear))
+  (neo-ime--clear)
+  (when (frame-live-p neo-ime--candidate-frame)
+    (delete-frame neo-ime--candidate-frame t))
+  (setq neo-ime--candidate-frame nil))
+
 
 ;;;###autoload
 (define-minor-mode neo-ime-mode
-  "Render Windows IME preedit inline, retaining the system's candidate list.
+  "Render Windows IME preedit inline and its candidates in a child frame.
 This global mode needs a Windows GUI and the companion native module.
 It does not select an IME or change `default-input-method'."
   :global t :group 'neo-ime

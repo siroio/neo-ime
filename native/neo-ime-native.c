@@ -11,6 +11,7 @@
 #include <commctrl.h>
 #include <imm.h>
 #include <stdint.h>
+#include <stddef.h>
 #include <limits.h>
 #include <stdlib.h>
 #include <string.h>
@@ -23,7 +24,7 @@ __declspec(dllexport) int plugin_is_GPL_compatible;
 typedef struct State {
   HWND hwnd;
   SRWLOCK lock;
-  BOOL alive, composing, saved_form, fallback;
+  BOOL alive, composing, saved_form, fallback, updating_forms;
   COMPOSITIONFORM original_form;
   CANDIDATEFORM original_candidate;
   BOOL saved_candidate;
@@ -31,6 +32,7 @@ typedef struct State {
   WCHAR *text;
   BYTE *attributes;
   LONG units, cursor;
+  CANDIDATELIST *candidates;
   POINT anchor;
   int height;
   struct State *next;
@@ -55,6 +57,8 @@ static void clear_state(State *s) {
   AcquireSRWLockExclusive(&s->lock);
   free(s->text);
   free(s->attributes);
+  free(s->candidates);
+  s->candidates = NULL;
   s->text = NULL;
   s->attributes = NULL;
   s->units = s->cursor = 0;
@@ -64,6 +68,8 @@ static void clear_state(State *s) {
 }
 
 static void position_ime(State *s, HIMC context) {
+  if (s->updating_forms) return;
+  s->updating_forms = TRUE;
   POINT anchor;
   int height;
   AcquireSRWLockShared(&s->lock);
@@ -75,11 +81,9 @@ static void position_ime(State *s, HIMC context) {
   COMPOSITIONFORM composition = {0};
   composition.dwStyle = CFS_RECT;
   composition.ptCurrentPos = anchor;
-  RECT client;
-  GetClientRect(s->hwnd, &client);
   composition.rcArea.left = composition.rcArea.top = -INT_MAX;
-  composition.rcArea.right = client.right;
-  composition.rcArea.bottom = client.bottom;
+  /* Keep right/bottom at zero: adding client extents would overflow the
+   * signed width/height used by IMM/TSF's candidate layout. */
   ImmSetCompositionWindow(context, &composition);
   CANDIDATEFORM candidate = {0};
   candidate.dwStyle = CFS_EXCLUDE;
@@ -89,6 +93,7 @@ static void position_ime(State *s, HIMC context) {
   candidate.rcArea.top = anchor.y;
   candidate.rcArea.bottom = anchor.y + height;
   ImmSetCandidateWindow(context, &candidate);
+  s->updating_forms = FALSE;
 }
 
 static BOOL read_composition(State *s, HIMC context) {
@@ -120,18 +125,60 @@ static BOOL read_composition(State *s, HIMC context) {
   return TRUE;
 }
 
+static void read_candidates(State *s, HIMC context) {
+  DWORD bytes = context ? ImmGetCandidateListW(context, 0, NULL, 0) : 0;
+  CANDIDATELIST *list = NULL;
+  size_t header = offsetof(CANDIDATELIST, dwOffset);
+  if (bytes >= header && bytes <= 1024 * 1024) {
+    list = malloc(bytes);
+    if (list) {
+      DWORD actual = ImmGetCandidateListW(context, 0, list, bytes);
+      BOOL valid = actual >= header && actual <= bytes && list->dwSize == actual
+        && list->dwCount <= (actual - header) / sizeof(DWORD);
+      if (valid) {
+        size_t strings = header + list->dwCount * sizeof(DWORD);
+        for (DWORD i = 0; i < list->dwCount && valid; ++i) {
+          DWORD offset = list->dwOffset[i];
+          valid = offset >= strings && offset < actual && offset % sizeof(WCHAR) == 0;
+          if (valid) {
+            WCHAR *text = (WCHAR *)((BYTE *)list + offset);
+            size_t count = (actual - offset) / sizeof(WCHAR), j = 0;
+            while (j < count && text[j]) ++j;
+            valid = j < count;
+          }
+        }
+        valid = valid && list->dwPageStart <= list->dwCount
+          && (!list->dwCount || (list->dwSelection < list->dwCount
+                                && list->dwPageStart < list->dwCount));
+      }
+      if (!valid) { free(list); list = NULL; }
+    }
+  }
+  AcquireSRWLockExclusive(&s->lock);
+  free(s->candidates);
+  s->candidates = list;
+  ++s->revision;
+  ReleaseSRWLockExclusive(&s->lock);
+}
+
 static void restore_ime(State *s) {
   HIMC context = ImmGetContext(s->hwnd);
   if (!context) return;
+  s->updating_forms = TRUE;
   if (s->saved_form) ImmSetCompositionWindow(context, &s->original_form);
   if (s->saved_candidate) ImmSetCandidateWindow(context, &s->original_candidate);
   ImmReleaseContext(s->hwnd, context);
+  s->updating_forms = FALSE;
 }
 
 static LRESULT CALLBACK ime_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
                                   UINT_PTR id, DWORD_PTR ref) {
   (void)id;
   State *s = (State *)ref;
+  /* IMM setters can synchronously re-enter STARTCOMPOSITION (Google IME).
+   * Do not reset the snapshot or set the forms recursively in that callback. */
+  if (msg == WM_IME_STARTCOMPOSITION
+      && (s->updating_forms || (s->composing && !s->fallback))) return 0;
   if (msg == control_message && wp == (WPARAM)&control_cookie) {
     if (lp == DETACH) {
       restore_ime(s);
@@ -151,10 +198,36 @@ static LRESULT CALLBACK ime_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
     return 1;
   }
   if (msg == WM_IME_SETCONTEXT && !s->fallback)
-    return DefSubclassProc(hwnd, msg, wp, lp & ~ISC_SHOWUICOMPOSITIONWINDOW);
+    return DefSubclassProc(hwnd, msg, wp, lp & ~(ISC_SHOWUICOMPOSITIONWINDOW | 0x0f));
+  if (msg == WM_IME_NOTIFY && !s->fallback) {
+    if (wp == IMN_OPENCANDIDATE || wp == IMN_CHANGECANDIDATE) {
+      HIMC context = ImmGetContext(hwnd);
+      read_candidates(s, context);
+      if (context) ImmReleaseContext(hwnd, context);
+    } else if (wp == IMN_CLOSECANDIDATE) read_candidates(s, NULL);
+  }
+  if (msg == WM_IME_REQUEST && wp == IMR_QUERYCHARPOSITION
+      && s->composing && !s->fallback) {
+    /* Owner-drawn preedit must provide visible screen coordinates, instead
+     * of the offscreen rectangle used to hide the native composition UI. */
+    IMECHARPOSITION *position = (IMECHARPOSITION *)lp;
+    if (!position || position->dwSize < sizeof(*position)) return 0;
+    AcquireSRWLockShared(&s->lock);
+    /* ponytail: one candidate anchor; per-character pixel positions if needed. */
+    position->pt = s->anchor;
+    position->cLineHeight = (UINT)s->height;
+    ReleaseSRWLockShared(&s->lock);
+    if (!ClientToScreen(hwnd, &position->pt)
+        || !GetClientRect(hwnd, &position->rcDocument)) return 0;
+    MapWindowPoints(hwnd, NULL, (POINT *)&position->rcDocument, 2);
+    return 1;
+  }
   if (msg == WM_IME_STARTCOMPOSITION) {
     clear_state(s);
     s->fallback = FALSE;
+    AcquireSRWLockExclusive(&s->lock);
+    s->composing = TRUE;
+    ReleaseSRWLockExclusive(&s->lock);
     HIMC context = ImmGetContext(hwnd);
     if (context) {
       s->saved_form = ImmGetCompositionWindow(context, &s->original_form);
@@ -162,14 +235,13 @@ static LRESULT CALLBACK ime_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
       position_ime(s, context);
       ImmReleaseContext(hwnd, context);
     } else {
+      clear_state(s);
       s->fallback = TRUE;
       return DefSubclassProc(hwnd, msg, wp, lp);
     }
-    AcquireSRWLockExclusive(&s->lock);
-    s->composing = TRUE;
-    ReleaseSRWLockExclusive(&s->lock);
-    /* We own preedit drawing.  Default processing would open the white box. */
-    return 0;
+    /* Initialize the IME's candidate UI, bypassing Emacs's handler which
+     * would overwrite our composition form with its visible rectangle. */
+    return DefWindowProcW(hwnd, msg, wp, lp);
   }
   if (msg == WM_IME_COMPOSITION) {
     if (s->fallback) return DefSubclassProc(hwnd, msg, wp, lp);
@@ -331,23 +403,47 @@ static emacs_value native_snapshot(emacs_env *env, ptrdiff_t n, emacs_value *arg
   int bytes = units ? WideCharToMultiByte(CP_UTF8, 0, s->text, units, NULL, 0, NULL, NULL) : 0;
   char *text = malloc((size_t)bytes + 1);
   BYTE *attrs = malloc((size_t)units + 1);
+  CANDIDATELIST *list = s->candidates ? malloc(s->candidates->dwSize) : NULL;
+  BOOL candidate_oom = s->candidates && !list;
+  if (list) memcpy(list, s->candidates, s->candidates->dwSize);
   if (text && attrs) {
     if (bytes) WideCharToMultiByte(CP_UTF8, 0, s->text, units, text, bytes, NULL, NULL);
     if (units) memcpy(attrs, s->attributes, (size_t)units);
   }
   ReleaseSRWLockShared(&s->lock);
-  if (!text || !attrs) { free(text); free(attrs); return error(env, "Cannot allocate IME snapshot"); }
+  if (!text || !attrs || candidate_oom) { free(text); free(attrs); free(list); return error(env, "Cannot allocate IME snapshot"); }
   emacs_value *values = malloc(((size_t)units + 1) * sizeof(*values));
-  if (!values) { free(text); free(attrs); return error(env, "Cannot allocate IME attributes"); }
+  if (!values) { free(text); free(attrs); free(list); return error(env, "Cannot allocate IME attributes"); }
   for (LONG i = 0; i < units; ++i) values[i] = env->make_integer(env, attrs[i]);
-  emacs_value result[5];
+  emacs_value result[9];
   result[0] = env->make_integer(env, (intmax_t)revision);
   result[1] = env->make_string(env, text, bytes);
   result[2] = env->make_integer(env, cursor);
   result[3] = env->funcall(env, env->intern(env, "vector"), units, values);
   result[4] = env->intern(env, composing ? "t" : "nil");
   free(values); free(text); free(attrs);
-  return env->funcall(env, env->intern(env, "vector"), 5, result);
+  DWORD start = list ? list->dwPageStart : 0;
+  DWORD count = list ? list->dwCount - start : 0;
+  DWORD page = list && list->dwPageSize ? list->dwPageSize : 9;
+  if (count > page) count = page;
+  values = malloc(((size_t)count + 1) * sizeof(*values));
+  if (!values) { free(list); return error(env, "Cannot allocate IME candidates"); }
+  for (DWORD i = 0; i < count; ++i) {
+    WCHAR *candidate = (WCHAR *)((BYTE *)list + list->dwOffset[start + i]);
+    int length = (int)wcslen(candidate);
+    int size = WideCharToMultiByte(CP_UTF8, 0, candidate, length, NULL, 0, NULL, NULL);
+    char *utf8 = malloc((size_t)size + 1);
+    if (!utf8) { free(values); free(list); return error(env, "Cannot allocate candidate text"); }
+    WideCharToMultiByte(CP_UTF8, 0, candidate, length, utf8, size, NULL, NULL);
+    values[i] = env->make_string(env, utf8, size);
+    free(utf8);
+  }
+  result[5] = env->funcall(env, env->intern(env, "vector"), count, values);
+  result[6] = env->make_integer(env, list ? list->dwSelection : 0);
+  result[7] = env->make_integer(env, start);
+  result[8] = env->make_integer(env, list ? list->dwCount : 0);
+  free(values); free(list);
+  return env->funcall(env, env->intern(env, "vector"), 9, result);
 }
 
 static void bind_function(emacs_env *env, const char *name, ptrdiff_t count,
@@ -367,7 +463,7 @@ __declspec(dllexport) int emacs_module_init(struct emacs_runtime *runtime) {
   bind_function(env, "neo-ime-native-position", 4, native_position, "Set HWND's candidate anchor X Y HEIGHT.");
   bind_function(env, "neo-ime-native-cancel", 1, native_cancel, "Cancel composition in HWND.");
   bind_function(env, "neo-ime-native-snapshot", 1, native_snapshot,
-                "Return [revision text utf16-cursor attributes composing] for HWND.");
+                "Return [revision text utf16-cursor attributes composing candidates selection page-start total] for HWND.");
   emacs_value feature = env->intern(env, "neo-ime-native");
   env->funcall(env, env->intern(env, "provide"), 1, &feature);
   return env->non_local_exit_check(env) == emacs_funcall_exit_return ? 0 : 3;
