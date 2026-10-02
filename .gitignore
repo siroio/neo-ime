@@ -1,0 +1,4 @@
+/var/
+*.elc
+/eln-cache/
+*.exe
