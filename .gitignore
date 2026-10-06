@@ -2,3 +2,32 @@
 *.elc
 /eln-cache/
 *.exe
+*.eln
+*~
+\#*\#
+.\#*
+*.o
+*.obj
+*.tar
+*.zip
+*.log
+*.stdout
+*.stderr
+*.tmp
+emacs_backtrace.txt
+__pycache__/
+*.pyc
+
+# Keep the distributed native backend; ignore other generated DLLs
+*.dll
+!/neo-ime-native.dll
+
+# Local editor/OS settings and environment secrets
+/.vscode/
+/.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+.env
+.env.*
+!.env.example
