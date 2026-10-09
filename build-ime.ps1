@@ -39,6 +39,7 @@ Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'native/check-ime-native.c') -De
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'native/COPYING') -Destination (Join-Path $packageRoot 'native/COPYING')
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'check-ime.el') -Destination $packageRoot
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'check-ime-gui.el') -Destination $packageRoot
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'check-ime-minibuffer.el') -Destination $packageRoot
 @'
 ;;; neo-ime-pkg.el --- Package metadata -*- lexical-binding: t; no-byte-compile: t; -*-
 (define-package "neo-ime" "0.1.4" "Inline Windows IME composition" '((emacs "29.1")))

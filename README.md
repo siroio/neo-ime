@@ -63,23 +63,38 @@ IME情報を取得できない場合は、その変換中だけWindows標準表�
 表示は `neo-ime-preedit` / `neo-ime-target` のfaceで調整できます。
 候補窓は親フレームのフォント・配色を使い、選択行は `highlight` faceで表示します。
 候補窓は入力フォーカスを取らず、確定・取消・フォーカス解除で閉じます。
-候補の表示先は `neo-ime-candidate-backend` で明示的に選べます。
-既定は `child-frame` です。Corfuを導入済みなら、以下でCorfuの候補窓を使えます。
+候補の表示先は通常バッファとミニバッファで独立して選べます。
+
+| 設定 | 対象 | 選択肢 |
+| --- | --- | --- |
+| `neo-ime-candidate-backend` | 通常バッファ | `corfu` / `child-frame` |
+| `neo-ime-minibuffer-candidate-backend` | ミニバッファ | `vertico` / `child-frame` |
+
+どちらも単体パッケージの既定値は `child-frame` です。
+`M-x customize-group RET neo-ime RET` で変更・保存できます。
+CorfuとVerticoを導入済みなら、以下で通常バッファにCorfu、ミニバッファにVerticoを使えます。
 
 ```elisp
 (use-package neo-ime
   :demand t
-  :custom (neo-ime-candidate-backend 'corfu)
+  :custom ((neo-ime-candidate-backend 'corfu)
+           (neo-ime-minibuffer-candidate-backend 'vertico))
   :hook (window-setup . (lambda () (neo-ime-mode 1)))
   :config
   (when (and (not noninteractive) after-init-time)
     (neo-ime-mode 1)))
 ```
 
-Corfuの自動検出・自動導入は行いません。`corfu` を指定したときだけ読み込み、
-未導入なら有効化時にエラーを表示します。`corfu-mode` の有効化は不要です。
-Corfuは表示に使い、候補順・選択・ページ切り替え・確定はWindows IMEが処理します。
-Corfuの内部描画APIを使うため、Corfuの更新で互換性が変わる可能性があります。
+両方を `child-frame` にすればCorfu・Verticoへの依存はありません。
+Corfu・Verticoの自動導入は行いません。選択した描画パッケージが未導入なら、
+有効化時にエラーを表示します。`corfu-mode` の有効化は不要です。
+`vertico` は既に有効なVerticoの補完セッションの候補領域を使用します。
+M-xなどでIME候補を表示している間はコマンド候補の再描画を抑え、
+候補が閉じたときや変換の確定・取消後に通常の補完表示へ戻します。
+`read-string` などVerticoのセッションがないミニバッファでは `child-frame` を使います。
+表示先にかかわらず、候補順・選択・ページ切り替え・確定はWindows IMEが処理します。
+Corfu・Verticoの内部描画APIを使うため、更新で互換性が変わる可能性があります。
+候補子フレームにはタブバー・タブ行を表示しません。
 `neo-ime-poll-interval` は初期値0.02秒です。変更後はmodeを再起動してください。
 
 ## ビルド
@@ -102,11 +117,14 @@ emacs.exe -Q --batch -l check-ime.el
 gcc -std=c11 -Wall -Wextra -Werror -o var/check-ime-native.exe native/check-ime-native.c -limm32 -lcomctl32
 .\var\check-ime-native.exe
 emacs.exe -Q -l "$PWD/check-ime-gui.el"
+emacs.exe -Q -L C:/path/to/corfu -L C:/path/to/vertico -l "$PWD/check-ime-minibuffer.el"
 ```
 
 `var/` とtarを用意するため、GUI検証の前にビルドを実行してください。
 GUI検証は専用のEmacsプロセスを起動して自動終了します。
 結果は `var/check-ime-gui.log` に書き込みます。
+ミニバッファ検証には導入済みCorfu・Verticoをload-pathに追加してください。
+結果は `var/check-ime-minibuffer.log` に書き込みます。
 
 確認する内容:
 
@@ -116,6 +134,8 @@ GUI検証は専用のEmacsプロセスを起動して自動終了します。
 - 合成したIMMデータでの部分確定・取得失敗時の標準表示復帰。
 - 候補データのオフセット・終端・件数の検証、ページ表示・選択行、候補子フレームの再利用と解除。
 - 明示的なCorfu切り替え、候補順・選択行・解除とUndoの保持。
+- M-xのVertico描画・再描画抑制・通常補完への復帰、通常バッファとは独立した表示選択。
+- タブバー・タブ行を有効にした環境での候補子フレームのタブ抑制。
 - 新しい一時環境へのパッケージ導入、DLL読み込み、GUIフレームでの有効化・無効化・再有効化。
 
 Windows x64 / Emacs 31.1で上記の検証を実行しています。
