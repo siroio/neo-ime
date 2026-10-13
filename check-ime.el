@@ -119,7 +119,7 @@
   (let ((neo-ime-candidate-backend 'corfu) (shown nil) (hidden 0)
         (corfu-min-width 15) (corfu-max-width 100))
     (cl-letf (((symbol-function 'neo-ime--require-corfu) #'ignore)
-              ((symbol-function 'posn-at-point) (lambda (&rest _) 'test-position))
+              ((symbol-function 'neo-ime--visible-position) (lambda (&rest _) 'test-position))
               ((symbol-function 'corfu--popup-show)
                (lambda (&rest args) (setq shown args)))
               ((symbol-function 'corfu--popup-hide)

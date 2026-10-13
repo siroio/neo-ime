@@ -69,6 +69,29 @@
     (error (setq neo-ime-mini-check-error err)))
   (abort-recursive-edit))
 
+(defun neo-ime-mini-check-clipped-preedit ()
+  "Exercise a glyph taller than the minibuffer without injecting errors."
+  (condition-case err
+      (let ((window (selected-window))
+            (original-height (face-attribute 'neo-ime-target :height)))
+        (unwind-protect
+            (progn
+              (set-face-attribute 'neo-ime-target nil :height 3.0)
+              ;; ASCII alone triggers the same negative coordinate as tall
+              ;; fallback-font glyphs.  The fix must depend on geometry.
+              (neo-ime--display window "abcdef" 6 [1 1 1 1 1 1])
+              (redisplay t)
+              (let ((coordinates (pos-visible-in-window-p
+                                  (overlay-start neo-ime--overlay) window t)))
+                (cl-assert coordinates)
+                (cl-assert (< (cadr coordinates) 0)))
+              (neo-ime--show-candidates (selected-frame) neo-ime-mini-check-state)
+              (neo-ime-mini-check-popup))
+          (set-face-attribute 'neo-ime-target nil :height original-height)
+          (neo-ime--clear)))
+    (error (setq neo-ime-mini-check-error err)))
+  (abort-recursive-edit))
+
 (condition-case err
     (progn
       (tab-bar-mode 1)
@@ -100,6 +123,13 @@
       (when neo-ime-mini-check-error (signal (car neo-ime-mini-check-error)
                                             (cdr neo-ime-mini-check-error)))
       (cl-assert (null neo-ime--overlay))
+      (let ((resize-mini-windows nil)
+            (max-mini-window-height 1)
+            (minibuffer-setup-hook
+             (list (lambda () (run-at-time 0.2 nil #'neo-ime-mini-check-clipped-preedit)))))
+        (condition-case nil (read-string "Clipped input: ") (quit nil)))
+      (when neo-ime-mini-check-error (signal (car neo-ime-mini-check-error)
+                                            (cdr neo-ime-mini-check-error)))
       ;; Normal-buffer selection stays independent from minibuffer selection.
       (setq neo-ime-candidate-backend 'corfu)
       (switch-to-buffer (get-buffer-create " *neo-ime normal check*"))

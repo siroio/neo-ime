@@ -132,6 +132,21 @@ and commits are always handled by Windows IME, not by Vertico."
     (corfu--popup-hide))
   (neo-ime--hide-vertico))
 
+(defun neo-ime--visible-position (point window)
+  "Return position information at the visible part of POINT in WINDOW.
+Tall glyphs in a short window can have a negative top coordinate.
+Unlike `posn-at-point', resolve that coordinate inside the viewport
+before passing it to `posn-at-x-y', which requires a nonnegative Y."
+  (when-let* ((coordinates (pos-visible-in-window-p point window t))
+              (x (car coordinates))
+              (y (cadr coordinates)))
+    ;; Keep posn-at-point's treatment of horizontally hidden positions.
+    (when (>= x -1)
+      (posn-at-x-y x (if (< y 0)
+                        (max 0 (+ y (or (nth 2 coordinates) 0)))
+                      y)
+                   window))))
+
 (defun neo-ime--show-candidates (frame state)
   "Display STATE using the explicitly selected backend in FRAME."
   (if (or (< (length state) 9) (= (length (aref state 5)) 0)
@@ -151,7 +166,8 @@ and commits are always handled by Windows IME, not by Vertico."
        (when (frame-live-p neo-ime--candidate-frame)
          (make-frame-invisible neo-ime--candidate-frame))
        (with-selected-window (overlay-get neo-ime--overlay 'window)
-         (when-let* ((position (posn-at-point (overlay-start neo-ime--overlay)))
+         (when-let* ((position (neo-ime--visible-position
+                               (overlay-start neo-ime--overlay) (selected-window)))
                      (candidates (aref state 5)))
            (let* ((lines (append
                           (cl-loop for text across candidates for index from 1
@@ -183,7 +199,7 @@ and commits are always handled by Windows IME, not by Vertico."
           (not (eq frame neo-ime--owner)))
       (neo-ime--hide-candidates)
     (let* ((window (overlay-get neo-ime--overlay 'window))
-           (position (posn-at-point (overlay-start neo-ime--overlay) window))
+           (position (neo-ime--visible-position (overlay-start neo-ime--overlay) window))
            (text (neo-ime--candidate-text (aref state 5) (aref state 6)
                                           (aref state 7) (aref state 8)))
            (buffer (get-buffer-create " *neo-ime candidates*")))
@@ -327,7 +343,7 @@ and commits are always handled by Windows IME, not by Vertico."
 (defun neo-ime--position (frame)
   "Update FRAME's candidate anchor from its selected window."
   (let* ((window (frame-selected-window frame))
-         (position (posn-at-point (window-point window) window)))
+         (position (neo-ime--visible-position (window-point window) window)))
     (when position
       (let ((xy (posn-x-y position))
             (edges (window-inside-pixel-edges window)))
