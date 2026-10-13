@@ -1,0 +1,15 @@
+BasedOnStyle: Google
+Language: Cpp
+Standard: c++20
+IncludeCategories:
+  # Win32 dependent headers require windows.h first.
+  - Regex: '^"neo_ime_native.h"$'
+    Priority: 0
+  - Regex: '^<windows.h>$'
+    Priority: 1
+  - Regex: '^<(commctrl|imm).h>$'
+    Priority: 2
+  - Regex: '^<.*>$'
+    Priority: 3
+  - Regex: '.*'
+    Priority: 4

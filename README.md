@@ -24,11 +24,7 @@ DLLを同梱しているため、導入時のCコンパイラは不要です。
 ```elisp
 (use-package neo-ime
   :vc (:url "https://github.com/siroio/neo-ime" :rev :newest)
-  :demand t
-  :hook (window-setup . (lambda () (neo-ime-mode 1)))
-  :config
-  (when (and (not noninteractive) after-init-time)
-    (neo-ime-mode 1)))
+  :hook (window-setup . neo-ime-mode))
 ```
 
 Windows側でGoogle日本語入力などのIMEを選び、半角/全角キーで入力します。
@@ -44,11 +40,7 @@ git clone https://github.com/siroio/neo-ime.git
 ```elisp
 (use-package neo-ime
   :load-path "C:/path/to/neo-ime"
-  :demand t
-  :hook (window-setup . (lambda () (neo-ime-mode 1)))
-  :config
-  (when (and (not noninteractive) after-init-time)
-    (neo-ime-mode 1)))
+  :hook (window-setup . neo-ime-mode))
 ```
 
 tar形式で導入する場合は `build-ime.ps1` が生成する `var/neo-ime-0.1.4.tar` を
@@ -76,13 +68,9 @@ CorfuとVerticoを導入済みなら、以下で通常バッファにCorfu、ミ
 
 ```elisp
 (use-package neo-ime
-  :demand t
   :custom ((neo-ime-candidate-backend 'corfu)
            (neo-ime-minibuffer-candidate-backend 'vertico))
-  :hook (window-setup . (lambda () (neo-ime-mode 1)))
-  :config
-  (when (and (not noninteractive) after-init-time)
-    (neo-ime-mode 1)))
+  :hook (window-setup . neo-ime-mode))
 ```
 
 両方を `child-frame` にすればCorfu・Verticoへの依存はありません。
@@ -96,10 +84,12 @@ M-xなどでIME候補を表示している間はコマンド候補の再描画�
 Corfu・Verticoの内部描画APIを使うため、更新で互換性が変わる可能性があります。
 候補子フレームにはタブバー・タブ行を表示しません。
 `neo-ime-poll-interval` は初期値0.02秒です。変更後はmodeを再起動してください。
+未変更のスナップショットはネイティブ側でコピーを省き、カーソル・候補だけの更新では
+未確定文字のfaceを付け直しません。LispとDLLを更新した後はEmacsを再起動してください。
 
 ## ビルド
 
-EmacsとMinGWのgccをPATHに用意し、リポジトリのルートで実行します。
+EmacsとMinGWのg++をPATHに用意し、リポジトリのルートで実行します。
 
 ```powershell
 .\build-ime.ps1
@@ -110,12 +100,23 @@ Emacsヘッダーの場所はEmacs自身から検出します。
 検出を上書きする場合は `-EmacsRoot 'C:/path/to/emacs'` を指定してください。
 DLLをロード済みなら、再ビルド前にそのEmacsを終了してください。
 
+native実装はC++20です。[Google C++ Style Guide](https://google.github.io/styleguide/cppguide.html)
+に基づき、`.clang-format` で整形します。Win32ヘッダーには依存順序があるため、
+`windows.h` が `commctrl.h`・`imm.h` より先になるよう設定しています。
+ロック・IMEコンテキスト・フック・バッファをRAIIで解放し、可変長候補の
+ヘッダー・オフセット・終端を検証します。共有するウィンドウ寿命フラグはatomicです。
+GUIスレッドではEmacs APIを呼ばず、Lisp値の生成はロックを解放してから行います。
+例外とRTTIは無効にし、確保失敗は戻り値で処理します。
+C++ランタイムは静的リンクするため、利用側に追加のMinGW DLLは不要です。
+
 ## 検証
 
 ```powershell
 emacs.exe -Q --batch -l check-ime.el
-gcc -std=c11 -Wall -Wextra -Werror -o var/check-ime-native.exe native/check-ime-native.c -limm32 -lcomctl32
+emacs.exe -Q --batch -l check-ime-performance.el
+g++ -std=c++20 -O2 -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Werror -fno-exceptions -fno-rtti -static -o var/check-ime-native.exe native/check_ime_native.cc -limm32 -lcomctl32
 .\var\check-ime-native.exe
+clang-format --dry-run --Werror native/neo_ime_native.cc native/neo_ime_native.h native/check_ime_native.cc
 emacs.exe -Q -l "$PWD/check-ime-gui.el"
 emacs.exe -Q -L C:/path/to/corfu -L C:/path/to/vertico -l "$PWD/check-ime-minibuffer.el"
 ```
@@ -130,8 +131,12 @@ GUI検証は専用のEmacsプロセスを起動して自動終了します。
 
 - 未確定文字のバッファ挿入、更新・取消時のUndoと変更フラグの保持、確定後のUndo/Redo。
 - 背景色の継承、UTF-16の位置変換、カーソル更新時の文字列の保持、保存前の一時文字除去。
+- カーソル・候補更新時のバッファ変更番号の保持、属性変更時のハイライト更新。
+- 未変更スナップショットの省略、候補座標の整数オーバーフローの拒否。
 - 実Windowsウィンドウの別スレッドへのattach/detach、フォーカス解除、破棄。
 - 合成したIMMデータでの部分確定・取得失敗時の標準表示復帰。
+- 属性取得のエラー・長さ超過、バッファ確保失敗、候補コピー失敗の処理。
+- 空の未確定文字で属性データがない場合の継続処理。
 - 候補データのオフセット・終端・件数の検証、ページ表示・選択行、候補子フレームの再利用と解除。
 - 明示的なCorfu切り替え、候補順・選択行・解除とUndoの保持。
 - M-xのVertico描画・再描画抑制・通常補完への復帰、通常バッファとは独立した表示選択。
@@ -143,12 +148,20 @@ Google日本語入力による実入力・変換、白い未確定文字窓の�
 100件の候補取得・次ページの表示・選択行の更新・Enter確定・確定後の一回のUndoを実GUIで検証しました。
 0.1.4では導入済みCorfuの実描画APIによる候補表示・選択行・非表示もGUI検証しています。
 CorfuのGUI検証は `NEO_IME_CHECK_CORFU=1` を設定し、Corfuをload-pathに追加して `check-ime-gui.el` を実行します。
+
+処理単体の計測は `emacs.exe -Q -l "$PWD/benchmark-ime.el"` で実行できます。
+実DLLの未変更スナップショット取得10万回と、同じ未確定文字の更新1万回を各5回測定します。
+`NEO_IME_BENCH_FAST=1` で変更番号を渡す取得経路を測定し、結果は
+`var/bench-before.log` / `var/bench-after.log` に秒数・GC回数・GC時間として保存します。
+コード変更の前後を比較するときは各版で実行してください。
+通常の実入力や画面表示全体の遅延を測るものではありません。
+
 IMM32互換の入力経路を使い、TSF専用の統合は実装していません。
 候補はキーボードで選択します。候補のマウス選択は実装していません。
 
 ## ライセンス
 
-`neo-ime.el`、`native/neo-ime-native.c`、およびそのDLLはGPL-3.0-or-laterです。
+`neo-ime.el`、`native/` 内のC++ソース・ヘッダー、およびそのDLLはGPL-3.0-or-laterです。
 原文は [COPYING](COPYING) にあります。
 その他のファイルは、既存の [MIT LICENSE](LICENSE) に従います。
 配布tar内の本体にもGPL表記とソースを同梱します。

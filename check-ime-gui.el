@@ -22,10 +22,23 @@
         (select-frame frame)
         (neo-ime-mode 1)
         (cl-assert (featurep 'neo-ime-native))
+        (cl-assert
+         (eq (condition-case err (neo-ime-native-snapshot "invalid")
+               (wrong-type-argument (car err)))
+             'wrong-type-argument))
         (cl-assert (assq frame neo-ime--frames))
+        ;; The exclusion rectangle needs room for x+1 and y+height.
+        (dolist (coordinates '((2147483647 0 1) (0 2147483647 1)))
+          (cl-assert
+           (condition-case nil
+               (progn (apply #'neo-ime-native-position (neo-ime--hwnd frame) coordinates) nil)
+             (error t))))
         (let ((snapshot (neo-ime-native-snapshot (neo-ime--hwnd frame))))
           (cl-assert (equal (aref snapshot 1) ""))
-          (cl-assert (not (aref snapshot 4))))
+          (cl-assert (not (aref snapshot 4)))
+          (cl-assert (null (neo-ime-native-snapshot (neo-ime--hwnd frame) (aref snapshot 0))))
+          (neo-ime-native-cancel (neo-ime--hwnd frame))
+          (cl-assert (vectorp (neo-ime-native-snapshot (neo-ime--hwnd frame) (aref snapshot 0)))))
         (neo-ime-native-cancel (neo-ime--hwnd frame))
         (neo-ime--poll)
         ;; Synthetic rendering snapshots must not race live native polling.

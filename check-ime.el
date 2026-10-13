@@ -95,7 +95,7 @@
         (neo-ime--frames (list (cons (selected-frame) -1)))
         (cancelled nil))
     (cl-letf (((symbol-function 'neo-ime-native-snapshot)
-               (lambda (_) [20 "あ" 1 [0] t]))
+               (lambda (_ &optional _revision) [20 "あ" 1 [0] t]))
               ((symbol-function 'neo-ime-native-cancel)
                (lambda (_) (setq cancelled t)))
               ((symbol-function 'neo-ime-native-detach) (lambda (_) t)))
