@@ -30,7 +30,8 @@
     (let* ((frame (selected-frame))
            (neo-ime--frames (list (cons frame -1)))
            (state [1 "あ" 1 [1] t ["亜"] 0 0 1]))
-      (cl-letf (((symbol-function 'neo-ime-native-snapshot)
+      (cl-letf (((symbol-function 'neo-ime-native-status) (lambda (_) 'unknown))
+                ((symbol-function 'neo-ime-native-snapshot)
                  (lambda (&rest _) state))
                 ((symbol-function 'neo-ime--show-candidates) #'ignore))
         (unwind-protect

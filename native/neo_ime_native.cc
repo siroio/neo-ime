@@ -263,6 +263,8 @@ struct WindowState {
   SRWLOCK lock = SRWLOCK_INIT;
   // Only GUI callbacks write this flag; Lisp can observe window destruction.
   std::atomic<bool> is_alive{true};
+  // -1: unavailable, 0: closed, 1: open. Written only on the GUI thread.
+  std::atomic<int> open_status{-1};
   bool is_composing = false;
   bool has_saved_composition_form = false;
   bool has_saved_candidate_form = false;
@@ -305,6 +307,21 @@ WindowState* FindState(HWND window) noexcept {
     }
   }
   return nullptr;
+}
+
+void RefreshOpenStatus(WindowState& state) noexcept {
+  const ImeContext context(state.window);
+  state.open_status.store(
+      context.get() ? (ImmGetOpenStatus(context.get()) ? 1 : 0) : -1,
+      std::memory_order_relaxed);
+}
+
+int ReadOpenStatus(HWND window) noexcept {
+  const WindowState* state = FindState(window);
+  if (!state || !state->is_alive.load(std::memory_order_acquire)) {
+    return -1;
+  }
+  return state->open_status.load(std::memory_order_relaxed);
 }
 
 void ClearState(WindowState& state) noexcept {
@@ -412,6 +429,10 @@ LRESULT CALLBACK ImeWindowProcedure(HWND window, UINT message, WPARAM parameter,
                                     DWORD_PTR reference);
 
 LRESULT HandleControl(WindowState& state, ControlOperation operation) noexcept {
+  if (operation == ControlOperation::kAttach) {
+    RefreshOpenStatus(state);
+    return 1;
+  }
   if (operation == ControlOperation::kDetach) {
     RestoreIme(state);
     if (!RemoveWindowSubclass(state.window, ImeWindowProcedure, kSubclassId)) {
@@ -530,6 +551,15 @@ LRESULT CALLBACK ImeWindowProcedure(HWND window, UINT message, WPARAM parameter,
   if (message == g_control_message &&
       parameter == reinterpret_cast<WPARAM>(&g_control_cookie)) {
     return HandleControl(state, static_cast<ControlOperation>(payload));
+  }
+  if (message == WM_INPUTLANGCHANGE) {
+    const LRESULT result = DefSubclassProc(window, message, parameter, payload);
+    RefreshOpenStatus(state);
+    return result;
+  }
+  if (message == WM_SETFOCUS || message == WM_IME_SETCONTEXT ||
+      (message == WM_IME_NOTIFY && parameter == IMN_SETOPENSTATUS)) {
+    RefreshOpenStatus(state);
   }
   if (message == WM_IME_SETCONTEXT && !state.use_native_fallback) {
     return DefSubclassProc(window, message, parameter,
@@ -768,6 +798,19 @@ emacs_value NativeCancel(emacs_env* environment, ptrdiff_t,
   return environment->intern(environment, "nil");
 }
 
+emacs_value NativeStatus(emacs_env* environment, ptrdiff_t,
+                         emacs_value* arguments, void*) noexcept {
+  const HWND window = WindowArgument(environment, arguments[0]);
+  if (environment->non_local_exit_check(environment) !=
+      emacs_funcall_exit_return) {
+    return nullptr;
+  }
+  const int status = ReadOpenStatus(window);
+  return environment->intern(environment, status < 0 ? "unknown"
+                                          : status   ? "on"
+                                                     : "off");
+}
+
 struct Snapshot {
   std::uint64_t revision = 0;
   LONG units = 0;
@@ -974,6 +1017,9 @@ extern "C" __declspec(dllexport) int emacs_module_init(
                         "Set HWND's candidate anchor X Y HEIGHT.");
   neo_ime::BindFunction(environment, "neo-ime-native-cancel", 1, 1,
                         neo_ime::NativeCancel, "Cancel composition in HWND.");
+  neo_ime::BindFunction(
+      environment, "neo-ime-native-status", 1, 1, neo_ime::NativeStatus,
+      "Return cached IME status: on, off, or unknown for HWND.");
   neo_ime::BindFunction(
       environment, "neo-ime-native-snapshot", 1, 2, neo_ime::NativeSnapshot,
       "Return [revision text utf16-cursor attributes composing "

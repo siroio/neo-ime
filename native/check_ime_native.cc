@@ -20,6 +20,18 @@ bool g_setting_position = false;
 unsigned int g_default_start_count = 0;
 int g_invalid_candidate = 0;
 HANDLE g_window_ready = nullptr;
+bool g_ime_open = false;
+bool g_no_context = false;
+
+HIMC FakeGetContext(HWND window) {
+  return g_no_context ? nullptr : ImmGetContext(window);
+}
+
+BOOL FakeOpenStatus(HIMC) {
+  assert(GetCurrentThreadId() ==
+         GetWindowThreadProcessId(g_test_window, nullptr));
+  return g_ime_open ? TRUE : FALSE;
+}
 
 DWORD FakeCandidates(HIMC, DWORD, CANDIDATELIST* output, DWORD) {
   struct CandidatePayload {
@@ -121,6 +133,8 @@ LONG FakeComposition(HIMC, DWORD kind, LPVOID output, DWORD byte_capacity) {
 #define ImmGetCompositionStringW FakeComposition
 #define ImmGetCandidateListW FakeCandidates
 #define ImmSetCompositionWindow FakeSetComposition
+#define ImmGetContext FakeGetContext
+#define ImmGetOpenStatus FakeOpenStatus
 #define DefWindowProcW FakeDefault
 #include "neo_ime_native.cc"
 
@@ -135,11 +149,16 @@ DWORD WINAPI WindowThread(void*) {
       CreateWindowW(L"Emacs", L"neo-ime check", WS_OVERLAPPED, 0, 0, 320, 200,
                     nullptr, nullptr, window_class.hInstance, nullptr);
   assert(g_test_window);
+  const HIMC context = ImmCreateContext();
+  assert(context);
+  const HIMC previous_context = ImmAssociateContext(g_test_window, context);
   SetEvent(g_window_ready);
   MSG message;
   while (GetMessageW(&message, nullptr, 0, 0) > 0) {
     DispatchMessageW(&message);
   }
+  ImmAssociateContext(g_test_window, previous_context);
+  ImmDestroyContext(context);
   DestroyWindow(g_test_window);
   return 0;
 }
@@ -239,6 +258,28 @@ void CheckComposition(neo_ime::WindowState& state) {
   SendMessageW(g_test_window, WM_KILLFOCUS, 0, 0);
   assert(!state.is_composing);
 }
+
+void CheckOpenStatus(neo_ime::WindowState& state) {
+  assert(neo_ime::ReadOpenStatus(g_test_window) == 0);
+  const std::uint64_t revision = state.revision;
+  g_ime_open = true;
+  SendMessageW(g_test_window, WM_IME_NOTIFY, IMN_SETOPENSTATUS, 0);
+  assert(neo_ime::ReadOpenStatus(g_test_window) == 1);
+  assert(state.revision == revision);  // Status does not rebuild composition.
+  state.use_native_fallback = true;
+  g_ime_open = false;
+  SendMessageW(g_test_window, WM_IME_NOTIFY, IMN_SETOPENSTATUS, 0);
+  assert(neo_ime::ReadOpenStatus(g_test_window) == 0);
+  g_no_context = true;
+  SendMessageW(g_test_window, WM_SETFOCUS, 0, 0);
+  assert(neo_ime::ReadOpenStatus(g_test_window) == -1);
+  g_no_context = false;
+  g_ime_open = true;
+  SendMessageW(g_test_window, WM_IME_SETCONTEXT, TRUE, ISC_SHOWUIALL);
+  assert(neo_ime::ReadOpenStatus(g_test_window) == 1);
+  state.use_native_fallback = false;
+  g_ime_open = false;
+}
 }  // namespace
 
 int main() {
@@ -253,14 +294,17 @@ int main() {
   assert(neo_ime::AttachWindow(g_test_window));
   neo_ime::WindowState* state = neo_ime::FindState(g_test_window);
   assert(state && state->is_alive);
+  CheckOpenStatus(*state);
   CheckComposition(*state);
   assert(neo_ime::DetachWindow(g_test_window));
   assert(!neo_ime::FindState(g_test_window));
+  assert(neo_ime::ReadOpenStatus(g_test_window) == -1);
   assert(neo_ime::DetachWindow(g_test_window));
   assert(neo_ime::AttachWindow(g_test_window));
   PostThreadMessageW(thread_id, WM_QUIT, 0, 0);
   assert(WaitForSingleObject(thread, 3000) == WAIT_OBJECT_0);
   assert(!neo_ime::FindState(g_test_window)->is_alive);
+  assert(neo_ime::ReadOpenStatus(g_test_window) == -1);
   assert(neo_ime::DetachWindow(g_test_window));
   CloseHandle(thread);
   CloseHandle(g_window_ready);

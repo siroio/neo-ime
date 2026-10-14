@@ -22,6 +22,13 @@
         (select-frame frame)
         (neo-ime-mode 1)
         (cl-assert (featurep 'neo-ime-native))
+        (cl-assert (memq (neo-ime-native-status (neo-ime--hwnd frame))
+                         '(on off unknown)))
+        (cl-assert (eq (neo-ime-native-status 0) 'unknown))
+        (cl-assert
+         (eq (condition-case err (neo-ime-native-status "invalid")
+               (wrong-type-argument (car err)))
+             'wrong-type-argument))
         (cl-assert
          (eq (condition-case err (neo-ime-native-snapshot "invalid")
                (wrong-type-argument (car err)))
@@ -77,8 +84,11 @@
             (cl-assert (not (assq (symbol-value 'corfu--frame) neo-ime--frames)))
             (cl-assert (not (frame-visible-p neo-ime--candidate-frame)))
             (with-current-buffer " *corfu*"
-              (cl-assert (string-match-p "2  亜" (buffer-string)))
               (goto-char (point-min)) (forward-line 1)
+              (cl-assert (equal (string-trim
+                                 (buffer-substring-no-properties
+                                  (line-beginning-position) (line-end-position)))
+                                "亜"))
               (let ((face (get-text-property (point) 'face)))
                 (cl-assert (or (eq face 'corfu-current)
                                (and (listp face) (memq 'corfu-current face))))))
@@ -98,6 +108,35 @@
         (cl-assert (not neo-ime--timer))
         (cl-assert (not neo-ime--candidate-frame))
         (cl-assert (not (neo-ime-native-snapshot (neo-ime--hwnd frame))))
+        (cl-assert (eq (neo-ime-native-status (neo-ime--hwnd frame)) 'unknown))
+        ;; Real frame parameters must remain independent, including detach,
+        ;; re-enable, and restoration when no explicit off color is supplied.
+        (set-frame-parameter frame 'cursor-color "green")
+        (let* ((neo-ime-cursor-color-on "red")
+               (neo-ime-cursor-color-off nil)
+               (second (make-frame '((window-system . w32) (visibility . nil)
+                                     (cursor-color . "blue")))))
+          (unwind-protect
+              (progn
+                (neo-ime-mode 1)
+                (neo-ime--update-status frame 'on)
+                (neo-ime--update-status second 'off)
+                (cl-assert (equal (frame-parameter frame 'cursor-color) "red"))
+                (cl-assert (equal (frame-parameter second 'cursor-color) "blue"))
+                (cl-assert (eq (neo-ime-status frame) 'on))
+                (cl-assert (eq (neo-ime-status second) 'off))
+                (neo-ime--update-status second 'on)
+                (neo-ime--detach second)
+                (cl-assert (equal (frame-parameter second 'cursor-color) "blue"))
+                (neo-ime-mode -1)
+                (cl-assert (equal (frame-parameter frame 'cursor-color) "green"))
+                (cl-assert (eq (neo-ime-status frame) 'unknown))
+                (neo-ime-mode 1)
+                (neo-ime--update-status frame 'on)
+                (neo-ime-mode -1)
+                (cl-assert (equal (frame-parameter frame 'cursor-color) "green")))
+            (neo-ime-mode -1)
+            (delete-frame second t)))
         (neo-ime-mode 1)
         (let ((second (make-frame '((window-system . w32) (visibility . nil)))))
           (cl-assert (assq second neo-ime--frames))
@@ -105,7 +144,7 @@
           (cl-assert (not (assq second neo-ime--frames))))
         (neo-ime-mode -1)
         (with-temp-file (expand-file-name "var/check-ime-gui.log" neo-ime-check-root)
-          (insert (format "NEO_IME_GUI=PASS clean-package-install real-w32-frames enable-disable-reenable corfu=%s\n"
+          (insert (format "NEO_IME_GUI=PASS clean-package-install real-w32-frames enable-disable-reenable status-cursor-restore corfu=%s\n"
                           (if (getenv "NEO_IME_CHECK_CORFU") "tested" "skipped")))))
     (when (fboundp 'neo-ime-mode) (neo-ime-mode -1))
     (when (frame-live-p frame) (delete-frame frame t)))))

@@ -80,6 +80,41 @@ Corfu・Verticoの内部描画APIを使うため、更新で互換性が変わ�
 未変更のスナップショットはネイティブ側でコピーを省き、カーソル・候補だけの更新では
 未確定文字のfaceを付け直しません。LispとDLLを更新した後はEmacsを再起動してください。
 
+## IME状態とカーソル色
+
+IMEがONのときはカーソルを赤くし、OFFのときは元の色を使います。
+色はフレームごとに保持し、状態が取得不能になったときやmodeを無効化したときに復元します。
+ON/OFFを自動で切り替える機能や、mode-lineへの表示は追加しません。
+
+```elisp
+(setq neo-ime-cursor-color-on "red"
+      neo-ime-cursor-color-off nil) ; nilは元のカーソル色
+
+(neo-ime-status)                 ; 選択中のフレーム: on / off / unknown
+(neo-ime-status (selected-frame)) ; フレームを明示して取得
+```
+
+両方の色を`nil`にするとカーソル色を変更せず、状態APIとフックだけを使えます。
+設定変更は次のポーリング時に反映します。
+`unknown`は未接続・無効化中・IMEコンテキストを取得できない場合を表し、OFFとは区別します。
+状態はWindows IMEのON/OFFであり、ひらがな・カタカナ・英数の変換モードではありません。
+
+`neo-ime-status`はキャッシュを読むだけなので、ユーザーのmode-line表示からも利用できます。
+Windows側の通知を既存タイマーで取り込み、通常は`neo-ime-poll-interval`の間隔で反映します。
+ポーリング間に起きた複数回の切り替えは、最後に観測した状態へまとめられます。
+
+状態が変わると`neo-ime-status-change-hook`をフレームと新しい状態の2引数で呼びます。
+初期状態は`unknown`で、有効化時に取得できた状態や、無効化時の`unknown`への変化も通知します。
+フック内で`neo-ime-status`を呼ぶと更新後の状態を取得できます。
+
+```elisp
+(defun my-ime-status-changed (_frame _status)
+  (force-mode-line-update t))
+(add-hook 'neo-ime-status-change-hook #'my-ime-status-changed)
+```
+
+この機能を使うにはLispと同梱DLLを両方更新し、Emacsを再起動してください。
+
 ## ビルド
 
 EmacsとMinGWのg++をPATHに用意し、リポジトリのルートで実行します。
@@ -107,6 +142,7 @@ C++ランタイムは静的リンクするため、利用側に追加のMinGW DL
 ```powershell
 emacs.exe -Q --batch -l check-ime.el
 emacs.exe -Q --batch -l check-ime-performance.el
+emacs.exe -Q --batch -l check-ime-status.el
 g++ -std=c++20 -O2 -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Werror -fno-exceptions -fno-rtti -static -o var/check-ime-native.exe native/check_ime_native.cc -limm32 -lcomctl32
 .\var\check-ime-native.exe
 clang-format --dry-run --Werror native/neo_ime_native.cc native/neo_ime_native.h native/check_ime_native.cc
@@ -126,6 +162,8 @@ GUI検証は専用のEmacsプロセスを起動して自動終了します。
 - 背景色の継承、UTF-16の位置変換、カーソル更新時の文字列の保持、保存前の一時文字除去。
 - カーソル・候補更新時のバッファ変更番号の保持、属性変更時のハイライト更新。
 - 未変更スナップショットの省略、候補座標の整数オーバーフローの拒否。
+- IME状態の3値、変更時だけのフック通知、色設定の変更・無効化・取得不能時の色復元。
+- 複数GUIフレームでの独立したカーソル色と再有効化、native側の状態通知と取得不能。
 - 実Windowsウィンドウの別スレッドへのattach/detach、フォーカス解除、破棄。
 - 合成したIMMデータでの部分確定・取得失敗時の標準表示復帰。
 - 属性取得のエラー・長さ超過、バッファ確保失敗、候補コピー失敗の処理。

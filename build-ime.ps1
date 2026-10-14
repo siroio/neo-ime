@@ -47,6 +47,7 @@ Copy-Item -LiteralPath (Join-Path $PSScriptRoot '.clang-format') -Destination $p
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'native/COPYING') -Destination (Join-Path $packageRoot 'native/COPYING')
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'check-ime.el') -Destination $packageRoot
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'check-ime-performance.el') -Destination $packageRoot
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'check-ime-status.el') -Destination $packageRoot
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'benchmark-ime.el') -Destination $packageRoot
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'check-ime-gui.el') -Destination $packageRoot
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'check-ime-minibuffer.el') -Destination $packageRoot

@@ -25,6 +25,19 @@
 (defcustom neo-ime-poll-interval 0.02
   "Seconds between native composition snapshots.  Restart the mode to apply."
   :type 'number :group 'neo-ime)
+(defcustom neo-ime-cursor-color-on "red"
+  "Cursor color when the Windows IME is on.
+Nil keeps the frame's original cursor color.  Changes apply on the next poll."
+  :type '(choice (const :tag "Original color" nil) color) :group 'neo-ime)
+(defcustom neo-ime-cursor-color-off nil
+  "Cursor color when the Windows IME is off.
+Nil keeps the frame's original cursor color.  Changes apply on the next poll."
+  :type '(choice (const :tag "Original color" nil) color) :group 'neo-ime)
+(defvar neo-ime-status-change-hook nil
+  "Functions called with FRAME and STATUS when the observed IME state changes.
+STATUS is `on', `off', or `unknown'.  The cached state is updated before
+these functions run.  Initial state is `unknown'; detaching returns to
+`unknown'.  Callbacks run on the Lisp thread, usually from the poll timer.")
 (defcustom neo-ime-candidate-backend 'child-frame
   "Candidate display backend for both ordinary buffers and minibuffers.
 `child-frame' uses neo-ime's popup.  `corfu' requires an installed Corfu
@@ -43,6 +56,7 @@ and uses its popup renderer only; the IME still selects and commits text."
 (declare-function neo-ime-native-snapshot "neo-ime-native" (hwnd &optional revision))
 (declare-function neo-ime-native-position "neo-ime-native" (hwnd x y height))
 (declare-function neo-ime-native-cancel "neo-ime-native" (hwnd))
+(declare-function neo-ime-native-status "neo-ime-native" (hwnd))
 (declare-function corfu--popup-show "corfu" (pos off width lines &optional curr lo bar))
 (declare-function corfu--popup-hide "corfu" ())
 (declare-function vertico--display-candidates "vertico" (lines))
@@ -60,6 +74,44 @@ and uses its popup renderer only; the IME still selects and commits text."
 (defvar neo-ime--candidate-frame nil)
 (defvar neo-ime--corfu-visible nil)
 (defvar neo-ime--vertico-buffer nil "Minibuffer currently displaying IME candidates.")
+
+(defun neo-ime-status (&optional frame)
+  "Return the last observed Windows IME state for FRAME.
+FRAME defaults to the selected frame.  Return `on', `off', or `unknown'
+if unavailable, not attached, or the mode is disabled.  This cached query
+is safe to use in mode-line evaluation; updates follow `neo-ime-poll-interval'.
+The result describes IME open status, not hiragana/katakana conversion mode."
+  (setq frame (or frame (selected-frame)))
+  (if (and (frame-live-p frame) (assq frame neo-ime--frames))
+      (or (frame-parameter frame 'neo-ime--status) 'unknown)
+    'unknown))
+
+(defun neo-ime--update-status (frame status)
+  "Publish STATUS for FRAME and apply its configured cursor color."
+  (when (frame-live-p frame)
+    (let* ((previous (or (frame-parameter frame 'neo-ime--status) 'unknown))
+           (saved (frame-parameter frame 'neo-ime--saved-cursor-color))
+           (color (pcase status
+                    ('on neo-ime-cursor-color-on)
+                    ('off neo-ime-cursor-color-off))))
+      (cond
+       (color
+        (unless saved
+          (set-frame-parameter frame 'neo-ime--saved-cursor-color
+                               (list (frame-parameter frame 'cursor-color))))
+        (unless (equal color (frame-parameter frame 'cursor-color))
+          (set-frame-parameter frame 'cursor-color color)))
+       (saved
+        (set-frame-parameter frame 'cursor-color (car saved))
+        (set-frame-parameter frame 'neo-ime--saved-cursor-color nil)))
+      (unless (eq previous status)
+        (set-frame-parameter frame 'neo-ime--status status)
+        (condition-case error-data
+            (run-hook-with-args 'neo-ime-status-change-hook frame status)
+          (error (display-warning 'neo-ime
+                                  (format "IME status hook: %s"
+                                          (error-message-string error-data))
+                                  :warning)))))))
 
 (defun neo-ime--require-corfu ()
   "Load the explicitly requested Corfu popup backend."
@@ -326,13 +378,15 @@ before passing it to `posn-at-x-y', which requires a nonnegative Y."
              (not (assq frame neo-ime--frames)))
     (neo-ime-native-attach (neo-ime--hwnd frame))
     (push (cons frame -1) neo-ime--frames)
+    (neo-ime--update-status frame (neo-ime-native-status (neo-ime--hwnd frame)))
     (neo-ime--position frame)))
 
 (defun neo-ime--detach (frame)
   "Detach FRAME and release its native state."
   (when (assq frame neo-ime--frames)
     (neo-ime-native-detach (neo-ime--hwnd frame))
-    (setq neo-ime--frames (assq-delete-all frame neo-ime--frames)))
+    (setq neo-ime--frames (assq-delete-all frame neo-ime--frames))
+    (neo-ime--update-status frame 'unknown))
   (when (eq frame neo-ime--owner) (neo-ime--clear)))
 
 (defun neo-ime--before-command ()
@@ -351,6 +405,8 @@ before passing it to `posn-at-x-y', which requires a nonnegative Y."
   "Render changed snapshots on the Lisp thread."
   (condition-case error-data
       (dolist (entry neo-ime--frames)
+        (neo-ime--update-status (car entry)
+                               (neo-ime-native-status (neo-ime--hwnd (car entry))))
         (let* ((frame (car entry))
                (state (neo-ime-native-snapshot (neo-ime--hwnd frame) (cdr entry))))
           (when (and state (/= (aref state 0) (cdr entry)))
@@ -415,6 +471,8 @@ It does not select an IME or change `default-input-method'."
             ('child-frame nil)
             (_ (user-error "Invalid neo-ime-candidate-backend: %S" neo-ime-candidate-backend)))
           (unless (featurep 'neo-ime-native) (module-load neo-ime-native-file))
+          (unless (fboundp 'neo-ime-native-status)
+            (user-error "Update neo-ime-native.dll and restart Emacs"))
           (dolist (frame (frame-list)) (neo-ime--attach frame))
           (add-hook 'after-make-frame-functions #'neo-ime--attach)
           (add-hook 'delete-frame-functions #'neo-ime--detach)
