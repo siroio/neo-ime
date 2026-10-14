@@ -55,31 +55,24 @@ IME情報を取得できない場合は、その変換中だけWindows標準表�
 表示は `neo-ime-preedit` / `neo-ime-target` のfaceで調整できます。
 候補窓は親フレームのフォント・配色を使い、選択行は `highlight` faceで表示します。
 候補窓は入力フォーカスを取らず、確定・取消・フォーカス解除で閉じます。
-候補の表示先は通常バッファとミニバッファで独立して選べます。
+候補の描画方法は `neo-ime-candidate-backend` だけで設定します。
+通常バッファ・ミニバッファともに同じ方法を使います。
 
-| 設定 | 対象 | 選択肢 |
-| --- | --- | --- |
-| `neo-ime-candidate-backend` | 通常バッファ | `corfu` / `child-frame` |
-| `neo-ime-minibuffer-candidate-backend` | ミニバッファ | `vertico` / `child-frame` |
-
-どちらも単体パッケージの既定値は `child-frame` です。
-`M-x customize-group RET neo-ime RET` で変更・保存できます。
-CorfuとVerticoを導入済みなら、以下で通常バッファにCorfu、ミニバッファにVerticoを使えます。
+- `corfu`: 入力位置の近くに枠付きポップアップを表示します。候補文字列だけを並べ、選択行を強調します。
+- `child-frame`: neo-ime独自の番号・件数付き候補窓を表示します。単体パッケージの既定値です。
 
 ```elisp
 (use-package neo-ime
-  :custom ((neo-ime-candidate-backend 'corfu)
-           (neo-ime-minibuffer-candidate-backend 'vertico))
+  :custom (neo-ime-candidate-backend 'corfu)
   :hook (window-setup . neo-ime-mode))
 ```
 
-両方を `child-frame` にすればCorfu・Verticoへの依存はありません。
-Corfu・Verticoの自動導入は行いません。選択した描画パッケージが未導入なら、
-有効化時にエラーを表示します。`corfu-mode` の有効化は不要です。
-`vertico` は既に有効なVerticoの補完セッションの候補領域を使用します。
-M-xなどでIME候補を表示している間はコマンド候補の再描画を抑え、
-候補が閉じたときや変換の確定・取消後に通常の補完表示へ戻します。
-`read-string` などVerticoのセッションがないミニバッファでは `child-frame` を使います。
+`M-x customize-group RET neo-ime RET` でも変更・保存できます。
+Corfuは別途導入してください。`corfu-mode` の有効化は不要です。
+`child-frame` はCorfu・Verticoを必要としません。
+Corfuでの変換中は通常のVertico候補欄を一時的に隠し、候補を閉じると元の表示へ戻します。
+`read-string` などVerticoを使わない入力欄でも、選んだ描画方法を使います。
+旧 `neo-ime-minibuffer-candidate-backend` 設定は削除してください。現在は使用しません。
 表示先にかかわらず、候補順・選択・ページ切り替え・確定はWindows IMEが処理します。
 Corfu・Verticoの内部描画APIを使うため、更新で互換性が変わる可能性があります。
 候補子フレームにはタブバー・タブ行を表示しません。

@@ -26,19 +26,11 @@
   "Seconds between native composition snapshots.  Restart the mode to apply."
   :type 'number :group 'neo-ime)
 (defcustom neo-ime-candidate-backend 'child-frame
-  "Candidate display backend for ordinary buffers.
+  "Candidate display backend for both ordinary buffers and minibuffers.
 `child-frame' uses neo-ime's popup.  `corfu' requires an installed Corfu
 and uses its popup renderer only; the IME still selects and commits text."
   :type '(choice (const :tag "neo-ime child frame" child-frame)
                  (const :tag "Corfu popup" corfu))
-  :group 'neo-ime)
-(defcustom neo-ime-minibuffer-candidate-backend 'child-frame
-  "Candidate display backend for minibuffers, independent of ordinary buffers.
-`vertico' borrows the active Vertico session's display during conversion.
-Without an active Vertico session, it uses `child-frame'.  Candidate selection
-and commits are always handled by Windows IME, not by Vertico."
-  :type '(choice (const :tag "neo-ime child frame" child-frame)
-                 (const :tag "Vertico candidate area" vertico))
   :group 'neo-ime)
 (defcustom neo-ime-native-file
   (expand-file-name "neo-ime-native.dll"
@@ -59,6 +51,7 @@ and commits are always handled by Windows IME, not by Vertico."
 (defvar corfu-max-width)
 (defvar vertico--candidates-ov)
 (defvar vertico--count-ov)
+(defvar vertico-resize)
 
 (defvar neo-ime--frames nil "Attached frames and last seen snapshot revisions.")
 (defvar neo-ime--timer nil)
@@ -75,10 +68,10 @@ and commits are always handled by Windows IME, not by Vertico."
     (user-error "neo-ime: install Corfu to use the corfu candidate backend")))
 
 (defun neo-ime--require-vertico ()
-  "Load the explicitly requested Vertico renderer and protect its display."
+  "Protect the active Vertico display while the IME popup is visible."
   (unless (and (require 'vertico nil t)
                (fboundp 'vertico--display-candidates) (fboundp 'vertico--exhibit))
-    (user-error "neo-ime: install Vertico to use the vertico candidate backend"))
+    (user-error "neo-ime: incompatible Vertico display API"))
   (unless (advice-member-p #'neo-ime--vertico-exhibit 'vertico--exhibit)
     (advice-add 'vertico--exhibit :around #'neo-ime--vertico-exhibit)))
 
@@ -86,18 +79,6 @@ and commits are always handled by Windows IME, not by Vertico."
   "Let ORIGINAL draw normal completion unless IME owns this minibuffer."
   (unless (eq (current-buffer) neo-ime--vertico-buffer)
     (apply original arguments)))
-
-(defun neo-ime--backend (window)
-  "Select the candidate backend for WINDOW."
-  (if (not (window-minibuffer-p window))
-      neo-ime-candidate-backend
-    (with-current-buffer (window-buffer window)
-      (if (and (eq neo-ime-minibuffer-candidate-backend 'vertico)
-               (not (and (boundp 'vertico--candidates-ov)
-                         (overlayp vertico--candidates-ov)
-                         (eq (overlay-buffer vertico--candidates-ov) (current-buffer)))))
-          'child-frame
-        neo-ime-minibuffer-candidate-backend))))
 
 (defun neo-ime--hide-vertico ()
   "Restore ordinary completion in the minibuffer borrowed from Vertico."
@@ -107,21 +88,6 @@ and commits are always handled by Windows IME, not by Vertico."
     (when (and (buffer-live-p buffer) (window-live-p window)
                (eq (window-buffer window) buffer))
       (with-selected-window window (vertico--exhibit)))))
-
-(defun neo-ime--show-vertico-candidates (state)
-  "Render STATE without changing Vertico's command candidates or selection."
-  (neo-ime--require-vertico)
-  (when (frame-live-p neo-ime--candidate-frame)
-    (make-frame-invisible neo-ime--candidate-frame))
-  (with-selected-window (overlay-get neo-ime--overlay 'window)
-    (setq neo-ime--vertico-buffer (current-buffer))
-    (overlay-put vertico--count-ov 'before-string nil)
-    ;; Vertico has no public renderer API; keep private display calls here.
-    (vertico--display-candidates
-     (mapcar (lambda (line) (concat line "\n"))
-             (split-string (neo-ime--candidate-text (aref state 5) (aref state 6)
-                                                    (aref state 7) (aref state 8))
-                           "\n")))))
 
 (defun neo-ime--hide-candidates ()
   "Hide the reusable candidate frame."
@@ -152,27 +118,30 @@ before passing it to `posn-at-x-y', which requires a nonnegative Y."
   (if (or (< (length state) 9) (= (length (aref state 5)) 0)
           (not (eq frame neo-ime--owner)))
       (neo-ime--hide-candidates)
-    (pcase (neo-ime--backend (overlay-get neo-ime--overlay 'window))
+    (pcase neo-ime-candidate-backend
       ('child-frame
        (when (or neo-ime--corfu-visible neo-ime--vertico-buffer)
          (neo-ime--hide-candidates))
        (neo-ime--show-child-candidates frame state))
-      ('vertico
-       (when neo-ime--corfu-visible (neo-ime--hide-candidates))
-       (neo-ime--show-vertico-candidates state))
       ('corfu
        (neo-ime--require-corfu)
-       (when neo-ime--vertico-buffer (neo-ime--hide-vertico))
        (when (frame-live-p neo-ime--candidate-frame)
          (make-frame-invisible neo-ime--candidate-frame))
        (with-selected-window (overlay-get neo-ime--overlay 'window)
+         (if (and (minibufferp) (boundp 'vertico--candidates-ov)
+                  (overlayp vertico--candidates-ov)
+                  (eq (overlay-buffer vertico--candidates-ov) (current-buffer)))
+             (progn
+               (neo-ime--require-vertico)
+               (setq neo-ime--vertico-buffer (current-buffer))
+               (overlay-put vertico--count-ov 'before-string nil)
+               (let ((vertico-resize t))
+                 (vertico--display-candidates nil)))
+           (when neo-ime--vertico-buffer (neo-ime--hide-vertico)))
          (when-let* ((position (neo-ime--visible-position
                                (overlay-start neo-ime--overlay) (selected-window)))
                      (candidates (aref state 5)))
-           (let* ((lines (append
-                          (cl-loop for text across candidates for index from 1
-                                   collect (format "%d  %s" index text))
-                          (list (format "%d / %d" (1+ (aref state 6)) (aref state 8)))))
+           (let* ((lines (append candidates nil))
                   (width (min corfu-max-width
                               (max corfu-min-width (apply #'max (mapcar #'string-width lines))))))
              ;; Corfu has no public rendering API; keep the private API use here.
@@ -293,7 +262,7 @@ before passing it to `posn-at-x-y', which requires a nonnegative Y."
                (eq (overlay-buffer neo-ime--overlay) (window-buffer window))
                (eq (overlay-get neo-ime--overlay 'window) window))
     ;; Close a normal completion session before temporary IME text is inserted.
-    (when (and (eq (neo-ime--backend window) 'corfu)
+    (when (and (eq neo-ime-candidate-backend 'corfu)
                (bound-and-true-p completion-in-region-mode))
       (completion-in-region-mode -1))
     (neo-ime--clear)
@@ -429,7 +398,7 @@ before passing it to `posn-at-x-y', which requires a nonnegative Y."
 
 ;;;###autoload
 (define-minor-mode neo-ime-mode
-  "Render Windows IME preedit inline using independently selected candidate UIs.
+  "Render Windows IME preedit inline using the selected candidate UI.
 This global mode needs a Windows GUI and the companion native module.
 It does not select an IME or change `default-input-method'."
   :global t :group 'neo-ime
@@ -445,11 +414,6 @@ It does not select an IME or change `default-input-method'."
             ('corfu (neo-ime--require-corfu))
             ('child-frame nil)
             (_ (user-error "Invalid neo-ime-candidate-backend: %S" neo-ime-candidate-backend)))
-          (pcase neo-ime-minibuffer-candidate-backend
-            ('vertico (neo-ime--require-vertico))
-            ('child-frame nil)
-            (_ (user-error "Invalid neo-ime-minibuffer-candidate-backend: %S"
-                           neo-ime-minibuffer-candidate-backend)))
           (unless (featurep 'neo-ime-native) (module-load neo-ime-native-file))
           (dolist (frame (frame-list)) (neo-ime--attach frame))
           (add-hook 'after-make-frame-functions #'neo-ime--attach)

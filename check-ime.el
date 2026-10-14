@@ -126,7 +126,7 @@
                (lambda () (cl-incf hidden))))
       (neo-ime--show-candidates (selected-frame)
                                [1 "亜" 1 [1] t ["亜" "あ"] 10 9 100])
-      (cl-assert (equal (nth 3 shown) '("1  亜" "2  あ" "11 / 100")))
+      (cl-assert (equal (nth 3 shown) '("亜" "あ")))
       (cl-assert (= (nth 4 shown) 1))
       (cl-assert (equal (buffer-substring-no-properties 1 2) "亜"))
       (cl-assert (not buffer-undo-list))
