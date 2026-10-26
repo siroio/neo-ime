@@ -8,6 +8,7 @@
 (require 'neo-ime)
 (require 'evil)
 (setq neo-ime-candidate-backend 'child-frame)
+(setq neo-ime-cursor-color-on "red" neo-ime-cursor-color-off "blue")
 (defvar neo-ime-evil-gui-error nil)
 
 (condition-case error-data
@@ -21,8 +22,11 @@
             (progn
               (evil-insert-state)
               (cl-assert (eq (neo-ime-open) 'on))
+              (cl-assert (equal (frame-parameter nil 'cursor-color) "red"))
               (evil-normal-state)
               (cl-assert (eq (neo-ime--control (selected-frame) 'open) 'off))
+              (neo-ime--poll)
+              (cl-assert (equal (frame-parameter nil 'cursor-color) "blue"))
               (evil-insert-state)
               (cl-assert (eq (neo-ime--control (selected-frame) 'open) 'off))
               (evil-normal-state)
@@ -50,7 +54,7 @@
               (cl-assert (eq (neo-ime--control (selected-frame) 'open) 'off)))
           (neo-ime-mode -1)))
       (with-temp-file (expand-file-name "var/check-ime-evil-gui.log" neo-ime-evil-gui-root)
-        (insert "NEO_IME_EVIL_GUI=PASS IMM32 TSF open-normal-close insert-stays-off minibuffer-on return-close\n"))
+        (insert "NEO_IME_EVIL_GUI=PASS IMM32 TSF open-normal-close cursor-colors insert-stays-off minibuffer-on return-close\n"))
       (kill-emacs 0))
   (error
    (when neo-ime-mode (neo-ime-mode -1))

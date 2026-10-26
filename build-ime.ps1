@@ -44,7 +44,7 @@ New-Item -ItemType Directory -Force -Path (Join-Path $packageRoot 'native') | Ou
 Copy-Item -LiteralPath $source -Destination (Join-Path $packageRoot 'native/neo_ime_native.cc')
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'native/neo_ime_native.h') -Destination (Join-Path $packageRoot 'native/neo_ime_native.h')
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'native/check_ime_native.cc') -Destination (Join-Path $packageRoot 'native/check_ime_native.cc')
-foreach ($file in @('tsf_text_store.h', 'tsf_text_store.cc', 'tsf_backend.h', 'tsf_backend.cc', 'tsf_compat.h', 'check_tsf_store.cc', 'check_tsf_input.cc')) {
+foreach ($file in @('tsf_text_store.h', 'tsf_text_store.cc', 'tsf_backend.h', 'tsf_backend.cc', 'tsf_compat.h', 'check_tsf_store.cc', 'check_tsf_backend.cc', 'check_tsf_input.cc')) {
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot "native/$file") -Destination (Join-Path $packageRoot "native/$file")
 }
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot '.clang-format') -Destination $packageRoot

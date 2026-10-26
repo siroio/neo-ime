@@ -165,8 +165,20 @@ HRESULT TsfBackend::Initialize() {
   HRESULT result = CoCreateInstance(CLSID_TF_ThreadMgr, nullptr,
                                     CLSCTX_INPROC_SERVER, IID_ITfThreadMgr,
                                     reinterpret_cast<void**>(manager_.put()));
-  if (SUCCEEDED(result)) result = manager_->Activate(&client_id_);
+  ComPtr<ITfThreadMgrEx> extended_manager;
+  if (SUCCEEDED(result))
+    result = manager_->QueryInterface(
+        IID_ITfThreadMgrEx, reinterpret_cast<void**>(extended_manager.put()));
+  if (SUCCEEDED(result))
+    result =
+        extended_manager->ActivateEx(&client_id_, TF_TMAE_UIELEMENTENABLEDONLY);
   active_ = SUCCEEDED(result);
+  DWORD active_flags = 0;
+  if (SUCCEEDED(result))
+    result = extended_manager->GetActiveFlags(&active_flags);
+  if (SUCCEEDED(result) && !(active_flags & TF_TMF_UIELEMENTENABLEDONLY))
+    result = E_NOTIMPL;
+  extended_manager.Reset();
   if (SUCCEEDED(result)) result = manager_->CreateDocumentMgr(document_.put());
   if (SUCCEEDED(result)) {
     store_ = new (std::nothrow) TextStore(window_);
@@ -202,14 +214,20 @@ HRESULT TsfBackend::Initialize() {
   CoCreateInstance(CLSID_TF_DisplayAttributeMgr, nullptr, CLSCTX_INPROC_SERVER,
                    IID_ITfDisplayAttributeMgr,
                    reinterpret_cast<void**>(display_attributes_.put()));
-  // Candidate interception is optional; unsupported UI keeps the IME's window.
-  if (SUCCEEDED(manager_->QueryInterface(
-          IID_ITfUIElementMgr, reinterpret_cast<void**>(ui_.put())))) {
-    ComPtr<ITfSource> source;
-    if (SUCCEEDED(manager_->QueryInterface(
-            IID_ITfSource, reinterpret_cast<void**>(source.put()))))
-      source->AdviseSink(IID_ITfUIElementSink,
-                         static_cast<ITfUIElementSink*>(this), &ui_cookie_);
+  result = manager_->QueryInterface(IID_ITfUIElementMgr,
+                                    reinterpret_cast<void**>(ui_.put()));
+  ComPtr<ITfSource> source;
+  if (SUCCEEDED(result))
+    result = manager_->QueryInterface(IID_ITfSource,
+                                      reinterpret_cast<void**>(source.put()));
+  if (SUCCEEDED(result))
+    result =
+        source->AdviseSink(IID_ITfUIElementSink,
+                           static_cast<ITfUIElementSink*>(this), &ui_cookie_);
+  source.Reset();
+  if (FAILED(result)) {
+    Shutdown();
+    return result;
   }
   Focus(GetFocus() == window_);
   return S_OK;
@@ -452,7 +470,6 @@ ULONG TsfBackend::Release() {
 }
 HRESULT TsfBackend::BeginUIElement(DWORD id, BOOL* show) {
   if (!show) return E_POINTER;
-  *show = TRUE;
   if (!ui_ || GetFocus() != window_) return S_OK;
   ComPtr<ITfUIElement> element;
   ComPtr<CandidateUi> candidates;

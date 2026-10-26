@@ -253,6 +253,19 @@ TSFの単体テストと専用Emacsでの初期化・解除、複数フレーム
 TSF専用GUIテストは同梱DLLを読みます。ビルド後、
 `emacs.exe -Q -l check-ime-tsf-gui.el` で実行できます。
 
+TSFはUI-lessモードで有効化し、候補UI通知の購読が失敗した場合は初期化失敗として扱います。
+Windows標準の入力窓・候補窓を抑止し、別フレームの通知で表示判断を上書きしません。
+IME状態のポーリングはGUIスレッドで現在値を取得し、状態変更通知が届かない場合もカーソル色へ反映します。
+次の回帰テストはUI-less有効化と表示判断の保持を検証します。
+
+```powershell
+g++ -std=c++20 -O2 -Wall -Wextra -Werror -static -o var/check-tsf-backend.exe native/check_tsf_backend.cc native/tsf_text_store.cc native/tsf_backend.cc -limm32 -lole32 -loleaut32 -luuid
+.\var\check-tsf-backend.exe
+```
+
+`check_ime_native.cc` は通知なしの状態変更とTSF時の標準UI抑止も検証します。
+`check-ime-evil-gui.el` は実DLLでIMEのON/OFFとカーソル色の連携を検証します。
+
 ## ライセンス
 
 `neo-ime.el`、`native/` 内のC++ソース・ヘッダー、およびそのDLLはGPL-3.0-or-laterです。

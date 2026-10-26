@@ -320,7 +320,8 @@ enum class ControlOperation : LPARAM {
   kDetach,
   kCancel,
   kPosition,
-  kTsfRequest
+  kTsfRequest,
+  kRefreshStatus
 };
 struct AttachRequest {
   WindowState* state = nullptr;
@@ -358,6 +359,12 @@ void RefreshOpenStatus(WindowState& state) noexcept {
 int ReadOpenStatus(HWND window) noexcept {
   const WindowState* state = FindState(window);
   if (!state || !state->is_alive.load(std::memory_order_acquire)) {
+    return kUnknownOpenStatus;
+  }
+  // IMEs need not send every state change through IMM notifications.
+  if (!SendMessageW(window, g_control_message,
+                    reinterpret_cast<WPARAM>(&g_control_cookie),
+                    static_cast<LPARAM>(ControlOperation::kRefreshStatus))) {
     return kUnknownOpenStatus;
   }
   return state->open_status.load(std::memory_order_relaxed);
@@ -525,7 +532,8 @@ LRESULT HandleControl(WindowState& state, ControlOperation operation) noexcept {
     RefreshOpenStatus(state);
     return TRUE;
   }
-  if (operation == ControlOperation::kAttach) {
+  if (operation == ControlOperation::kAttach ||
+      operation == ControlOperation::kRefreshStatus) {
     RefreshOpenStatus(state);
     return 1;
   }
@@ -674,8 +682,6 @@ LRESULT CALLBACK ImeWindowProcedure(HWND window, UINT message, WPARAM parameter,
                message == WM_IME_COMPOSITION ||
                message == WM_IME_ENDCOMPOSITION || message == WM_IME_CHAR) {
       return 0;
-    } else if (message == WM_IME_SETCONTEXT) {
-      return DefSubclassProc(window, message, parameter, payload);
     }
   }
   if (message == WM_INPUTLANGCHANGE) {
@@ -687,7 +693,8 @@ LRESULT CALLBACK ImeWindowProcedure(HWND window, UINT message, WPARAM parameter,
       (message == WM_IME_NOTIFY && parameter == IMN_SETOPENSTATUS)) {
     RefreshOpenStatus(state);
   }
-  if (message == WM_IME_SETCONTEXT && !state.use_native_fallback) {
+  if (message == WM_IME_SETCONTEXT &&
+      (state.tsf || !state.use_native_fallback)) {
     return DefSubclassProc(
         window, message, parameter,
         payload & ~(ISC_SHOWUICOMPOSITIONWINDOW | kCandidateUiMask));

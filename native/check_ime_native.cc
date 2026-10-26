@@ -18,6 +18,7 @@ int g_invalid_attributes = 0;
 HWND g_test_window = nullptr;
 bool g_setting_position = false;
 unsigned int g_default_start_count = 0;
+LPARAM g_context_ui_flags = 0;
 int g_invalid_candidate = 0;
 HANDLE g_window_ready = nullptr;
 bool g_ime_open = false;
@@ -99,6 +100,7 @@ LRESULT CALLBACK FakeDefault(HWND window, UINT message, WPARAM parameter,
   if (message == WM_IME_STARTCOMPOSITION) {
     ++g_default_start_count;
   }
+  if (message == WM_IME_SETCONTEXT) g_context_ui_flags = payload;
   return DefWindowProcW(window, message, parameter, payload);
 }
 
@@ -287,6 +289,8 @@ void CheckOpenStatus(neo_ime::WindowState& state) {
   assert(neo_ime::ReadOpenStatus(g_test_window) == 0);
   const std::uint64_t revision = state.revision;
   g_ime_open = true;
+  // A status query must not depend on a prior IMN_SETOPENSTATUS notification.
+  assert(neo_ime::ReadOpenStatus(g_test_window) == 1);
   SendMessageW(g_test_window, WM_IME_NOTIFY, IMN_SETOPENSTATUS, 0);
   assert(neo_ime::ReadOpenStatus(g_test_window) == 1);
   assert(state.revision == revision);  // Status does not rebuild composition.
@@ -330,6 +334,21 @@ void CheckControls(neo_ime::WindowState& state) {
   assert(FAILED(execute()));
   g_no_context = false;
 }
+
+void CheckTsfContext(neo_ime::WindowState& state) {
+  neo_ime::TsfRequest request;
+  request.operation = neo_ime::TsfOperation::kStart;
+  state.tsf_request = &request;
+  SendMessageW(g_test_window, neo_ime::g_control_message,
+               reinterpret_cast<WPARAM>(&neo_ime::g_control_cookie),
+               static_cast<LPARAM>(neo_ime::ControlOperation::kTsfRequest));
+  state.tsf_request = nullptr;
+  assert(SUCCEEDED(request.result) && state.tsf);
+  SendMessageW(g_test_window, WM_IME_SETCONTEXT, TRUE, ISC_SHOWUIALL);
+  assert(g_context_ui_flags ==
+         (static_cast<LPARAM>(ISC_SHOWUIALL) &
+          ~(ISC_SHOWUICOMPOSITIONWINDOW | neo_ime::kCandidateUiMask)));
+}
 }  // namespace
 
 int main() {
@@ -347,6 +366,7 @@ int main() {
   CheckOpenStatus(*state);
   CheckControls(*state);
   CheckComposition(*state);
+  CheckTsfContext(*state);
   assert(neo_ime::DetachWindow(g_test_window));
   assert(!neo_ime::FindState(g_test_window));
   assert(neo_ime::ReadOpenStatus(g_test_window) == -1);
