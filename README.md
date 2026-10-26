@@ -43,7 +43,7 @@ git clone https://github.com/siroio/neo-ime.git
   :hook (window-setup . neo-ime-mode))
 ```
 
-tar形式で導入する場合は `build-ime.ps1` が生成する `var/neo-ime-0.2.0.tar` を
+tar形式で導入する場合は `build-ime.ps1` が生成する `var/neo-ime-0.2.1.tar` を
 `M-x package-install-file` で選び、上の宣言の `:vc` / `:load-path` を省いてください。
 このリポジトリはMELPAなどのパッケージアーカイブには登録していません。
 
@@ -123,7 +123,7 @@ EmacsとMinGWのg++をPATHに用意し、リポジトリのルートで実行し
 .\build-ime.ps1
 ```
 
-DLLと、DLL・Lisp・nativeソース・手順・ライセンスを含む `var/neo-ime-0.2.0.tar` を生成します。
+DLLと、DLL・Lisp・nativeソース・手順・ライセンスを含む `var/neo-ime-0.2.1.tar` を生成します。
 Emacsヘッダーの場所はEmacs自身から検出します。
 検出を上書きする場合は `-EmacsRoot 'C:/path/to/emacs'` を指定してください。
 DLLをロード済みなら、再ビルド前にそのEmacsを終了してください。
@@ -252,6 +252,8 @@ TSFの単体テストと専用Emacsでの初期化・解除、複数フレーム
 従来のGoogle日本語入力の確認結果はIMM32経路の結果で、TSFの実入力成功を示すものではありません。
 TSF専用GUIテストは同梱DLLを読みます。ビルド後、
 `emacs.exe -Q -l check-ime-tsf-gui.el` で実行できます。
+
+### 0.2.1の修正
 
 TSFはUI-lessモードで有効化し、候補UI通知の購読が失敗した場合は初期化失敗として扱います。
 Windows標準の入力窓・候補窓を抑止し、別フレームの通知で表示判断を上書きしません。

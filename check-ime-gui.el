@@ -15,7 +15,7 @@
   (unwind-protect
       (progn
         (package-initialize)
-        (package-install-file (expand-file-name "var/neo-ime-0.2.0.tar" neo-ime-check-root))
+        (package-install-file (expand-file-name "var/neo-ime-0.2.1.tar" neo-ime-check-root))
         (require 'neo-ime)
         (setq neo-ime-input-backend 'imm32)
         (cl-assert (file-in-directory-p (locate-library "neo-ime") package-user-dir))

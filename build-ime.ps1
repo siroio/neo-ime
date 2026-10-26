@@ -20,7 +20,7 @@ Write-Output "NEO_IME_BUILD=PASS $output"
 
 # An installable package includes its DLL; package-install-file on .el alone
 # would silently omit the native backend.
-$packageName = 'neo-ime-0.2.0'
+$packageName = 'neo-ime-0.2.1'
 $buildRoot = Join-Path $PSScriptRoot 'var/ime-package'
 $packageRoot = Join-Path $buildRoot $packageName
 New-Item -ItemType Directory -Force -Path $packageRoot | Out-Null
@@ -60,9 +60,9 @@ foreach ($file in @('check-ime-tsf.el', 'check-ime-tsf-gui.el', 'check-ime-tsf-i
 }
 @'
 ;;; neo-ime-pkg.el --- Package metadata -*- lexical-binding: t; no-byte-compile: t; -*-
-(define-package "neo-ime" "0.2.0" "Inline Windows IME composition" '((emacs "29.1")))
+(define-package "neo-ime" "0.2.1" "Inline Windows IME composition" '((emacs "29.1")))
 '@ | Set-Content -LiteralPath (Join-Path $packageRoot 'neo-ime-pkg.el') -Encoding utf8
-$archive = Join-Path $PSScriptRoot 'var/neo-ime-0.2.0.tar'
+$archive = Join-Path $PSScriptRoot 'var/neo-ime-0.2.1.tar'
 & tar.exe -cf $archive -C $buildRoot $packageName
 if ($LASTEXITCODE -ne 0) { throw 'neo-ime package archive failed' }
 Write-Output "NEO_IME_PACKAGE=PASS $archive"

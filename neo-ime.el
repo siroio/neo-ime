@@ -1,5 +1,5 @@
 ;;; neo-ime.el --- Inline Windows IME composition -*- lexical-binding: t; -*-
-;; Version: 0.2.0
+;; Version: 0.2.1
 ;; Author: SIRO
 ;; URL: https://github.com/siroio/neo-ime
 ;; Package-Requires: ((emacs "29.1"))
