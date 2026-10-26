@@ -1,5 +1,5 @@
 ;;; neo-ime.el --- Inline Windows IME composition -*- lexical-binding: t; -*-
-;; Version: 0.1.4
+;; Version: 0.2.0
 ;; Author: SIRO
 ;; URL: https://github.com/siroio/neo-ime
 ;; Package-Requires: ((emacs "29.1"))
@@ -66,6 +66,11 @@ and uses its popup renderer only; the IME still selects and commits text."
 (defvar vertico--candidates-ov)
 (defvar vertico--count-ov)
 (defvar vertico-resize)
+(defvar evil-local-mode)
+(defvar evil-state)
+(defconst neo-ime--evil-state-hooks
+  '(evil-normal-state-entry-hook evil-visual-state-entry-hook
+    evil-motion-state-entry-hook evil-operator-state-entry-hook))
 
 (defvar neo-ime--frames nil "Attached frames and last seen snapshot revisions.")
 (defvar neo-ime--timer nil)
@@ -74,6 +79,8 @@ and uses its popup renderer only; the IME still selects and commits text."
 (defvar neo-ime--candidate-frame nil)
 (defvar neo-ime--corfu-visible nil)
 (defvar neo-ime--vertico-buffer nil "Minibuffer currently displaying IME candidates.")
+
+(require 'neo-ime-tsf)
 
 (defun neo-ime-status (&optional frame)
   "Return the last observed Windows IME state for FRAME.
@@ -200,7 +207,8 @@ before passing it to `posn-at-x-y', which requires a nonnegative Y."
              (setq neo-ime--corfu-visible t)
              (corfu--popup-show position 0 width
                                 (mapcar (lambda (line) (truncate-string-to-width line width)) lines)
-                                (- (aref state 6) (aref state 7)))))))
+                                (let ((index (- (aref state 6) (aref state 7))))
+                                  (and (<= 0 index) (< index (length lines)) index)))))))
       (_ (user-error "Invalid neo-ime-candidate-backend: %S" neo-ime-candidate-backend)))))
 
 (defun neo-ime--candidate-text (candidates selection start total)
@@ -298,12 +306,17 @@ before passing it to `posn-at-x-y', which requires a nonnegative Y."
         (widen)
         (let ((start (overlay-start neo-ime--overlay))
               (end (overlay-end neo-ime--overlay))
+              (tsf-session (overlay-get neo-ime--overlay 'neo-ime-tsf-session))
               (window (overlay-get neo-ime--overlay 'window)))
           (let ((inhibit-read-only t))
-            (neo-ime--temporary-edit (delete-region start end)))
+            (neo-ime--temporary-edit (delete-region start end))
+            (when tsf-session (neo-ime--tsf-restore-preview tsf-session start)))
           (when (and (window-live-p window)
                      (eq (window-buffer window) (current-buffer)))
-            (set-window-point window start)))))
+            (set-window-point window
+                              (if tsf-session
+                                  (+ start (length (neo-ime--tsf-session-committed tsf-session)))
+                                start))))))
     (delete-overlay neo-ime--overlay))
   (setq neo-ime--overlay nil neo-ime--owner nil)
   (neo-ime--hide-candidates))
@@ -351,6 +364,7 @@ before passing it to `posn-at-x-y', which requires a nonnegative Y."
   "Cancel preedit before manual or automatic saving."
   ;; auto-save-hook is global and can run with a different current buffer.
   (when neo-ime--owner
+    (neo-ime--tsf-cancel neo-ime--owner)
     (when (frame-live-p neo-ime--owner)
       (neo-ime-native-cancel (neo-ime--hwnd neo-ime--owner)))
     (neo-ime--clear)))
@@ -378,7 +392,9 @@ before passing it to `posn-at-x-y', which requires a nonnegative Y."
              (not (assq frame neo-ime--frames)))
     (neo-ime-native-attach (neo-ime--hwnd frame))
     (push (cons frame -1) neo-ime--frames)
+    (neo-ime--tsf-attach frame)
     (neo-ime--update-status frame (neo-ime-native-status (neo-ime--hwnd frame)))
+    (when (eq frame (selected-frame)) (neo-ime--evil-sync))
     (neo-ime--position frame)))
 
 (defun neo-ime--detach (frame)
@@ -387,10 +403,30 @@ before passing it to `posn-at-x-y', which requires a nonnegative Y."
     (neo-ime-native-detach (neo-ime--hwnd frame))
     (setq neo-ime--frames (assq-delete-all frame neo-ime--frames))
     (neo-ime--update-status frame 'unknown))
+  (set-frame-parameter frame 'neo-ime--tsf nil)
+  (setq neo-ime--tsf-sessions (assq-delete-all frame neo-ime--tsf-sessions))
   (when (eq frame neo-ime--owner) (neo-ime--clear)))
+
+(defun neo-ime--evil-sync ()
+  "Close the native IME in the selected buffer's Evil command states."
+  (when (and neo-ime-mode (assq (selected-frame) neo-ime--frames)
+             (bound-and-true-p evil-local-mode)
+             (memq (bound-and-true-p evil-state) '(normal visual motion operator))
+             (eq (current-buffer) (window-buffer (selected-window)))
+             (not (minibufferp)))
+    ;; Native Windows IMEs bypass Evil's Emacs input-method hooks.
+    (condition-case error-data
+        (unless (eq (neo-ime--control (selected-frame) 'open) 'off)
+          (neo-ime-close))
+      (error (display-warning 'neo-ime
+                              (format "Cannot close IME for Evil: %s"
+                                      (error-message-string error-data))
+                              :warning)))))
 
 (defun neo-ime--before-command ()
   "Cancel unfinished composition before an Emacs command changes its owner."
+  (when (frame-parameter nil 'neo-ime--tsf)
+    (neo-ime--tsf-cancel (selected-frame)))
   (when neo-ime--owner
     ;; A partial IME commit may also start the next clause.  Its confirmed
     ;; WM_IME_CHAR events become self-insert-command; do not cancel that clause.
@@ -407,6 +443,8 @@ before passing it to `posn-at-x-y', which requires a nonnegative Y."
       (dolist (entry neo-ime--frames)
         (neo-ime--update-status (car entry)
                                (neo-ime-native-status (neo-ime--hwnd (car entry))))
+        (if (frame-parameter (car entry) 'neo-ime--tsf)
+            (neo-ime--tsf-poll (car entry))
         (let* ((frame (car entry))
                (state (neo-ime-native-snapshot (neo-ime--hwnd frame) (cdr entry))))
           (when (and state (/= (aref state 0) (cdr entry)))
@@ -421,7 +459,7 @@ before passing it to `posn-at-x-y', which requires a nonnegative Y."
                    ;; Read-only views must not disable IME in every frame.
                    (neo-ime-native-cancel (neo-ime--hwnd frame))
                    (neo-ime--clear)))
-              (when (eq frame neo-ime--owner) (neo-ime--clear))))))
+              (when (eq frame neo-ime--owner) (neo-ime--clear)))))))
     (error
      (neo-ime-mode -1)
      (display-warning 'neo-ime (error-message-string error-data) :error))))
@@ -429,6 +467,16 @@ before passing it to `posn-at-x-y', which requires a nonnegative Y."
 (defun neo-ime--after-command ()
   "Keep the native candidate anchor aligned with point."
   (when (assq (selected-frame) neo-ime--frames)
+    (neo-ime--evil-sync)
+    (when (and (frame-parameter nil 'neo-ime--tsf)
+               (not (eq this-command 'neo-ime-reconvert)))
+      (neo-ime--tsf-prepare (selected-frame)))
+    (neo-ime--position (selected-frame))))
+
+(defun neo-ime--minibuffer-setup ()
+  "Move the TSF input range before the first minibuffer key is consumed."
+  (when (frame-parameter nil 'neo-ime--tsf)
+    (neo-ime--tsf-cancel (selected-frame))
     (neo-ime--position (selected-frame))))
 
 (defun neo-ime--stop ()
@@ -439,10 +487,13 @@ before passing it to `posn-at-x-y', which requires a nonnegative Y."
   (remove-hook 'delete-frame-functions #'neo-ime--detach)
   (remove-hook 'pre-command-hook #'neo-ime--before-command)
   (remove-hook 'post-command-hook #'neo-ime--after-command)
+  (dolist (hook neo-ime--evil-state-hooks)
+    (remove-hook hook #'neo-ime--evil-sync))
   (remove-hook 'kill-emacs-hook #'neo-ime--stop)
   (remove-hook 'before-save-hook #'neo-ime--before-save)
   (remove-hook 'auto-save-hook #'neo-ime--before-save)
   (remove-hook 'minibuffer-exit-hook #'neo-ime--minibuffer-exit)
+  (remove-hook 'minibuffer-setup-hook #'neo-ime--minibuffer-setup)
   (dolist (entry (copy-sequence neo-ime--frames))
     (neo-ime--detach (car entry)))
   (neo-ime--clear)
@@ -471,17 +522,20 @@ It does not select an IME or change `default-input-method'."
             ('child-frame nil)
             (_ (user-error "Invalid neo-ime-candidate-backend: %S" neo-ime-candidate-backend)))
           (unless (featurep 'neo-ime-native) (module-load neo-ime-native-file))
-          (unless (fboundp 'neo-ime-native-status)
+          (unless (and (fboundp 'neo-ime-native-status) (fboundp 'neo-ime-native-control))
             (user-error "Update neo-ime-native.dll and restart Emacs"))
           (dolist (frame (frame-list)) (neo-ime--attach frame))
           (add-hook 'after-make-frame-functions #'neo-ime--attach)
           (add-hook 'delete-frame-functions #'neo-ime--detach)
           (add-hook 'pre-command-hook #'neo-ime--before-command)
           (add-hook 'post-command-hook #'neo-ime--after-command)
+          (dolist (hook neo-ime--evil-state-hooks)
+            (add-hook hook #'neo-ime--evil-sync))
           (add-hook 'kill-emacs-hook #'neo-ime--stop)
           (add-hook 'before-save-hook #'neo-ime--before-save)
           (add-hook 'auto-save-hook #'neo-ime--before-save)
           (add-hook 'minibuffer-exit-hook #'neo-ime--minibuffer-exit)
+          (add-hook 'minibuffer-setup-hook #'neo-ime--minibuffer-setup)
           (unless (timerp neo-ime--timer)
             ;; ponytail: poll snapshots at 50 Hz; native event transport if latency matters.
             (setq neo-ime--timer (run-at-time 0 neo-ime-poll-interval #'neo-ime--poll))))

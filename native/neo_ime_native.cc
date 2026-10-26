@@ -3,6 +3,7 @@
 // No Emacs API calls on the GUI thread. Confirmed characters use Emacs's
 // original WM_IME_CHAR path; Lisp polls independently owned snapshots.
 #include "neo_ime_native.h"
+#include "tsf_backend.h"
 
 #define UNICODE
 #define _UNICODE
@@ -22,6 +23,7 @@
 #include <climits>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <cwchar>
@@ -43,6 +45,29 @@ namespace {
 
 constexpr DWORD kMaximumPayloadBytes = 1024 * 1024;
 constexpr UINT_PTR kSubclassId = 0x4e454f49;
+constexpr int kUnknownOpenStatus = -1;
+constexpr int kClosedStatus = 0;
+constexpr int kOpenStatus = 1;
+constexpr int kDefaultLineHeight = 20;
+constexpr DWORD kDefaultCandidatePageSize = 9;
+constexpr std::size_t kWindowClassNameCapacity = 32;
+constexpr int kRectanglePointCount = 2;
+constexpr std::size_t kErrorMessageCapacity = 96;
+constexpr LPARAM kCandidateUiMask =
+    ISC_SHOWUICANDIDATEWINDOW | (ISC_SHOWUICANDIDATEWINDOW << 1) |
+    (ISC_SHOWUICANDIDATEWINDOW << 2) | (ISC_SHOWUICANDIDATEWINDOW << 3);
+enum SnapshotField : std::size_t {
+  kSnapshotRevision,
+  kSnapshotText,
+  kSnapshotCursor,
+  kSnapshotAttributes,
+  kSnapshotComposing,
+  kSnapshotCandidates,
+  kSnapshotSelection,
+  kSnapshotPageStart,
+  kSnapshotTotal,
+  kSnapshotFieldCount
+};
 #ifdef NEO_IME_TEST
 bool g_fail_buffer_allocation = false;
 #endif
@@ -264,7 +289,7 @@ struct WindowState {
   // Only GUI callbacks write this flag; Lisp can observe window destruction.
   std::atomic<bool> is_alive{true};
   // -1: unavailable, 0: closed, 1: open. Written only on the GUI thread.
-  std::atomic<int> open_status{-1};
+  std::atomic<int> open_status{kUnknownOpenStatus};
   bool is_composing = false;
   bool has_saved_composition_form = false;
   bool has_saved_candidate_form = false;
@@ -279,7 +304,9 @@ struct WindowState {
   LONG cursor_units = 0;
   CandidateList candidates;
   POINT candidate_anchor{};
-  int line_height = 20;
+  int line_height = kDefaultLineHeight;
+  TsfBackend* tsf = nullptr;
+  TsfRequest* tsf_request = nullptr;
   WindowState* next = nullptr;
 };
 
@@ -292,7 +319,8 @@ enum class ControlOperation : LPARAM {
   kAttach = 1,
   kDetach,
   kCancel,
-  kPosition
+  kPosition,
+  kTsfRequest
 };
 struct AttachRequest {
   WindowState* state = nullptr;
@@ -310,16 +338,27 @@ WindowState* FindState(HWND window) noexcept {
 }
 
 void RefreshOpenStatus(WindowState& state) noexcept {
+  if (state.tsf) {
+    TsfRequest request;
+    request.operation = TsfOperation::kGetOpen;
+    state.tsf->Execute(request);
+    state.open_status.store(
+        FAILED(request.result) ? kUnknownOpenStatus
+                               : (request.value ? kOpenStatus : kClosedStatus));
+    return;
+  }
   const ImeContext context(state.window);
   state.open_status.store(
-      context.get() ? (ImmGetOpenStatus(context.get()) ? 1 : 0) : -1,
+      context.get()
+          ? (ImmGetOpenStatus(context.get()) ? kOpenStatus : kClosedStatus)
+          : kUnknownOpenStatus,
       std::memory_order_relaxed);
 }
 
 int ReadOpenStatus(HWND window) noexcept {
   const WindowState* state = FindState(window);
   if (!state || !state->is_alive.load(std::memory_order_acquire)) {
-    return -1;
+    return kUnknownOpenStatus;
   }
   return state->open_status.load(std::memory_order_relaxed);
 }
@@ -429,11 +468,73 @@ LRESULT CALLBACK ImeWindowProcedure(HWND window, UINT message, WPARAM parameter,
                                     DWORD_PTR reference);
 
 LRESULT HandleControl(WindowState& state, ControlOperation operation) noexcept {
+  if (operation == ControlOperation::kTsfRequest) {
+    TsfRequest* request = state.tsf_request;
+    if (!request) return FALSE;
+    if (request->operation == TsfOperation::kStart && !state.tsf) {
+      auto* backend = new (std::nothrow) TsfBackend(state.window);
+      if (!backend) {
+        request->result = E_OUTOFMEMORY;
+        return TRUE;
+      }
+      request->result = backend->Initialize();
+      if (SUCCEEDED(request->result))
+        state.tsf = backend;
+      else
+        backend->Release();
+    } else if (state.tsf) {
+      state.tsf->Execute(*request);
+    } else {
+      const ImeContext context(state.window);
+      request->result = E_NOTIMPL;
+      if (context.get()) {
+        DWORD conversion = 0, sentence = 0;
+        switch (request->operation) {
+          case TsfOperation::kGetOpen:
+            request->value = ImmGetOpenStatus(context.get());
+            request->result = S_OK;
+            break;
+          case TsfOperation::kSetOpen:
+            request->result =
+                ImmSetOpenStatus(context.get(), request->value != 0) ? S_OK
+                                                                     : E_FAIL;
+            break;
+          case TsfOperation::kGetConversion:
+            if (ImmGetConversionStatus(context.get(), &conversion, &sentence)) {
+              request->value = static_cast<LONG>(conversion);
+              request->result = S_OK;
+            }
+            break;
+          case TsfOperation::kSetConversion:
+            if (ImmGetConversionStatus(context.get(), &conversion, &sentence)) {
+              constexpr DWORD kShapeMask =
+                  IME_CMODE_NATIVE | IME_CMODE_KATAKANA | IME_CMODE_FULLSHAPE;
+              conversion = (conversion & ~kShapeMask) |
+                           (static_cast<DWORD>(request->value) & kShapeMask);
+              request->result =
+                  ImmSetConversionStatus(context.get(), conversion, sentence)
+                      ? S_OK
+                      : E_FAIL;
+            }
+            break;
+          default:
+            break;
+        }
+      }
+    }
+    RefreshOpenStatus(state);
+    return TRUE;
+  }
   if (operation == ControlOperation::kAttach) {
     RefreshOpenStatus(state);
     return 1;
   }
   if (operation == ControlOperation::kDetach) {
+    if (state.tsf) {
+      state.tsf->Shutdown();
+      state.tsf->Release();
+      state.tsf = nullptr;
+    }
     RestoreIme(state);
     if (!RemoveWindowSubclass(state.window, ImeWindowProcedure, kSubclassId)) {
       return 0;
@@ -444,6 +545,16 @@ LRESULT HandleControl(WindowState& state, ControlOperation operation) noexcept {
     return 1;
   }
   {
+    if (state.tsf) {
+      if (operation == ControlOperation::kCancel) {
+        TsfRequest request;
+        request.operation = TsfOperation::kCancel;
+        state.tsf->Execute(request);
+      } else if (operation == ControlOperation::kPosition) {
+        state.tsf->SetAnchor(state.candidate_anchor, state.line_height);
+      }
+      return TRUE;
+    }
     const ImeContext context(state.window);
     if (context.get() && operation == ControlOperation::kCancel) {
       ImmNotifyIME(context.get(), NI_COMPOSITIONSTR, CPS_CANCEL, 0);
@@ -475,7 +586,8 @@ LRESULT QueryCharacterPosition(WindowState& state, LPARAM payload) noexcept {
     return 0;
   }
   MapWindowPoints(state.window, nullptr,
-                  reinterpret_cast<POINT*>(&position->rcDocument), 2);
+                  reinterpret_cast<POINT*>(&position->rcDocument),
+                  kRectanglePointCount);
   return 1;
 }
 
@@ -552,6 +664,20 @@ LRESULT CALLBACK ImeWindowProcedure(HWND window, UINT message, WPARAM parameter,
       parameter == reinterpret_cast<WPARAM>(&g_control_cookie)) {
     return HandleControl(state, static_cast<ControlOperation>(payload));
   }
+  if (state.tsf) {
+    if (message == WM_SETFOCUS) state.tsf->Focus(true);
+    if (message == WM_NCDESTROY) {
+      state.tsf->Shutdown();
+      state.tsf->Release();
+      state.tsf = nullptr;
+    } else if (message == WM_IME_STARTCOMPOSITION ||
+               message == WM_IME_COMPOSITION ||
+               message == WM_IME_ENDCOMPOSITION || message == WM_IME_CHAR) {
+      return 0;
+    } else if (message == WM_IME_SETCONTEXT) {
+      return DefSubclassProc(window, message, parameter, payload);
+    }
+  }
   if (message == WM_INPUTLANGCHANGE) {
     const LRESULT result = DefSubclassProc(window, message, parameter, payload);
     RefreshOpenStatus(state);
@@ -562,8 +688,9 @@ LRESULT CALLBACK ImeWindowProcedure(HWND window, UINT message, WPARAM parameter,
     RefreshOpenStatus(state);
   }
   if (message == WM_IME_SETCONTEXT && !state.use_native_fallback) {
-    return DefSubclassProc(window, message, parameter,
-                           payload & ~(ISC_SHOWUICOMPOSITIONWINDOW | 0x0f));
+    return DefSubclassProc(
+        window, message, parameter,
+        payload & ~(ISC_SHOWUICOMPOSITIONWINDOW | kCandidateUiMask));
   }
   if (message == WM_IME_NOTIFY && !state.use_native_fallback) {
     if (parameter == IMN_OPENCANDIDATE || parameter == IMN_CHANGECANDIDATE) {
@@ -640,9 +767,10 @@ class WindowHook {
 bool AttachWindow(HWND window) noexcept {
   DWORD process_id = 0;
   const DWORD thread_id = GetWindowThreadProcessId(window, &process_id);
-  WCHAR class_name[32]{};
+  WCHAR class_name[kWindowClassNameCapacity]{};
   if (!thread_id || process_id != GetCurrentProcessId() ||
-      !GetClassNameW(window, class_name, 32) ||
+      !GetClassNameW(window, class_name,
+                     static_cast<int>(kWindowClassNameCapacity)) ||
       std::wcscmp(class_name, L"Emacs") != 0) {
     return false;
   }
@@ -862,7 +990,8 @@ emacs_value MakeCandidates(emacs_env* environment,
                            const CandidateList& candidates) noexcept {
   const CandidateHeader& header = candidates.header();
   const DWORD remaining = header.candidate_count - header.page_start;
-  const DWORD page_size = header.page_size == 0 ? 9 : header.page_size;
+  const DWORD page_size =
+      header.page_size == 0 ? kDefaultCandidatePageSize : header.page_size;
   const DWORD count = std::min(remaining, page_size);
   auto values = AllocateBuffer<emacs_value>(count);
   if (!values) {
@@ -913,28 +1042,34 @@ emacs_value MakeSnapshot(emacs_env* environment,
       return nullptr;
     }
   }
-  emacs_value result[9];
-  result[0] = environment->make_integer(
+  emacs_value result[kSnapshotFieldCount];
+  result[kSnapshotRevision] = environment->make_integer(
       environment, static_cast<intmax_t>(snapshot.revision));
-  result[1] = environment->make_string(environment, snapshot.utf8_text.get(),
-                                       snapshot.utf8_bytes);
-  result[2] = environment->make_integer(environment, snapshot.cursor_units);
-  result[3] = environment->funcall(environment,
-                                   environment->intern(environment, "vector"),
-                                   snapshot.units, attributes.get());
-  result[4] =
+  result[kSnapshotText] = environment->make_string(
+      environment, snapshot.utf8_text.get(), snapshot.utf8_bytes);
+  result[kSnapshotCursor] =
+      environment->make_integer(environment, snapshot.cursor_units);
+  result[kSnapshotAttributes] = environment->funcall(
+      environment, environment->intern(environment, "vector"), snapshot.units,
+      attributes.get());
+  result[kSnapshotComposing] =
       environment->intern(environment, snapshot.is_composing ? "t" : "nil");
-  result[5] = MakeCandidates(environment, snapshot.candidates);
+  result[kSnapshotCandidates] =
+      MakeCandidates(environment, snapshot.candidates);
   if (environment->non_local_exit_check(environment) !=
       emacs_funcall_exit_return) {
     return nullptr;
   }
   const CandidateHeader& header = snapshot.candidates.header();
-  result[6] = environment->make_integer(environment, header.selection);
-  result[7] = environment->make_integer(environment, header.page_start);
-  result[8] = environment->make_integer(environment, header.candidate_count);
-  return environment->funcall(
-      environment, environment->intern(environment, "vector"), 9, result);
+  result[kSnapshotSelection] =
+      environment->make_integer(environment, header.selection);
+  result[kSnapshotPageStart] =
+      environment->make_integer(environment, header.page_start);
+  result[kSnapshotTotal] =
+      environment->make_integer(environment, header.candidate_count);
+  return environment->funcall(environment,
+                              environment->intern(environment, "vector"),
+                              kSnapshotFieldCount, result);
 }
 
 emacs_value NativeSnapshot(emacs_env* environment, ptrdiff_t argument_count,
@@ -978,6 +1113,208 @@ emacs_value NativeSnapshot(emacs_env* environment, ptrdiff_t argument_count,
     return SignalError(environment, "Cannot allocate or convert IME snapshot");
   }
   return MakeSnapshot(environment, *snapshot);
+}
+
+bool SendTsfRequest(WindowState& state, TsfRequest& request) noexcept {
+  if (!state.is_alive.load(std::memory_order_acquire) || state.tsf_request)
+    return false;
+  state.tsf_request = &request;
+  const LRESULT handled =
+      SendMessageW(state.window, g_control_message,
+                   reinterpret_cast<WPARAM>(&g_control_cookie),
+                   static_cast<LPARAM>(ControlOperation::kTsfRequest));
+  state.tsf_request = nullptr;
+  return handled != FALSE;
+}
+
+emacs_value WideString(emacs_env* environment, const std::wstring& text) {
+  if (text.empty()) return environment->make_string(environment, "", 0);
+  const int units = static_cast<int>(text.size());
+  const int size =
+      WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, text.data(), units,
+                          nullptr, 0, nullptr, nullptr);
+  if (!size) return SignalError(environment, "Invalid UTF-16 from TSF");
+  std::string utf8(static_cast<std::size_t>(size), '\0');
+  if (!WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, text.data(), units,
+                           utf8.data(), size, nullptr, nullptr))
+    return SignalError(environment, "Cannot convert TSF text");
+  return environment->make_string(environment, utf8.data(), size);
+}
+
+bool LispWideString(emacs_env* environment, emacs_value value,
+                    std::wstring& text) {
+  ptrdiff_t size = 0;
+  if (!environment->copy_string_contents(environment, value, nullptr, &size))
+    return false;
+  if (size <= 0 || size > kMaximumPayloadBytes) {
+    SignalError(environment, "IME session is too large");
+    return false;
+  }
+  std::string utf8(static_cast<std::size_t>(size), '\0');
+  if (!environment->copy_string_contents(environment, value, utf8.data(),
+                                         &size))
+    return false;
+  if (size == 1) {
+    text.clear();
+    return true;
+  }
+  const int units =
+      MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8.data(),
+                          static_cast<int>(size - 1), nullptr, 0);
+  if (!units) {
+    SignalError(environment, "IME session must contain valid Unicode");
+    return false;
+  }
+  text.resize(static_cast<std::size_t>(units));
+  return MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8.data(),
+                             static_cast<int>(size - 1), text.data(),
+                             units) != 0;
+}
+
+emacs_value MakeTsfRead(emacs_env* environment, const TsfRequest& request) {
+  std::vector<emacs_value> edits;
+  edits.reserve(request.edits.size());
+  for (const TextEdit& edit : request.edits) {
+    std::vector<emacs_value> attributes;
+    attributes.reserve(edit.attributes.size());
+    for (const BYTE attribute : edit.attributes)
+      attributes.push_back(environment->make_integer(environment, attribute));
+    // Keep this protocol in sync with neo-ime--tsf-apply-event.
+    emacs_value fields[] = {
+        environment->make_integer(environment,
+                                  static_cast<intmax_t>(edit.revision)),
+        environment->make_integer(environment,
+                                  static_cast<intmax_t>(edit.generation)),
+        WideString(environment, edit.text),
+        environment->make_integer(environment, edit.cursor),
+        environment->make_integer(environment, edit.composition_start),
+        environment->make_integer(environment, edit.composition_length),
+        environment->intern(environment, edit.composing ? "t" : "nil"),
+        environment->funcall(
+            environment, environment->intern(environment, "vector"),
+            static_cast<ptrdiff_t>(attributes.size()), attributes.data())};
+    if (environment->non_local_exit_check(environment) !=
+        emacs_funcall_exit_return)
+      return nullptr;
+    edits.push_back(environment->funcall(
+        environment, environment->intern(environment, "vector"),
+        std::size(fields), fields));
+  }
+  std::vector<emacs_value> candidates;
+  for (const auto& text : request.candidates)
+    candidates.push_back(WideString(environment, text));
+  if (environment->non_local_exit_check(environment) !=
+      emacs_funcall_exit_return)
+    return nullptr;
+  emacs_value result[] = {
+      environment->funcall(environment,
+                           environment->intern(environment, "vector"),
+                           static_cast<ptrdiff_t>(edits.size()), edits.data()),
+      environment->funcall(
+          environment, environment->intern(environment, "vector"),
+          static_cast<ptrdiff_t>(candidates.size()), candidates.data()),
+      environment->make_integer(environment, request.selection),
+      environment->make_integer(environment, request.page_start),
+      environment->make_integer(environment, request.total)};
+  return environment->funcall(environment,
+                              environment->intern(environment, "vector"),
+                              std::size(result), result);
+}
+
+emacs_value NativeControl(emacs_env* environment, ptrdiff_t count,
+                          emacs_value* arguments, void*) noexcept {
+  try {
+    const HWND window = WindowArgument(environment, arguments[0]);
+    if (environment->non_local_exit_check(environment) !=
+        emacs_funcall_exit_return)
+      return nullptr;
+    WindowState* state = FindState(window);
+    if (!state) return SignalError(environment, "IME frame is not attached");
+    const auto command_is = [&](const char* name) {
+      return environment->eq(environment, arguments[1],
+                             environment->intern(environment, name));
+    };
+    TsfRequest request;
+    if (command_is("start") && count == 2)
+      request.operation = TsfOperation::kStart;
+    else if (command_is("read") && count == 2)
+      request.operation = TsfOperation::kRead;
+    else if (command_is("cancel") && count == 2)
+      request.operation = TsfOperation::kCancel;
+    else if (command_is("reconvert") && count == 2)
+      request.operation = TsfOperation::kReconvert;
+    else if (command_is("reset") && count == 5) {
+      request.operation = TsfOperation::kReset;
+      if (!LispWideString(environment, arguments[2], request.text))
+        return nullptr;
+      const intmax_t generation =
+          environment->extract_integer(environment, arguments[3]);
+      if (generation < 0)
+        return SignalError(environment, "Invalid IME generation");
+      request.generation = static_cast<std::uint64_t>(generation);
+      request.read_only =
+          environment->eq(environment, arguments[4],
+                          environment->intern(environment, "read-only"));
+      request.selection_end = static_cast<LONG>(request.text.size());
+      request.selection_start =
+          environment->is_not_nil(environment, arguments[4])
+              ? 0
+              : request.selection_end;
+    } else if (command_is("ack") && count == 3) {
+      request.operation = TsfOperation::kAcknowledge;
+      const intmax_t revision =
+          environment->extract_integer(environment, arguments[2]);
+      if (revision < 0)
+        return SignalError(environment, "Invalid IME acknowledgement");
+      request.acknowledgement = static_cast<std::uint64_t>(revision);
+    } else if (command_is("open") && (count == 2 || count == 3)) {
+      request.operation =
+          count == 2 ? TsfOperation::kGetOpen : TsfOperation::kSetOpen;
+      if (count == 3)
+        request.value = environment->is_not_nil(environment, arguments[2]);
+    } else if (command_is("conversion") && (count == 2 || count == 3)) {
+      request.operation = count == 2 ? TsfOperation::kGetConversion
+                                     : TsfOperation::kSetConversion;
+      if (count == 3) {
+        const intmax_t value =
+            environment->extract_integer(environment, arguments[2]);
+        constexpr LONG kShapeMask =
+            IME_CMODE_NATIVE | IME_CMODE_KATAKANA | IME_CMODE_FULLSHAPE;
+        if (value < 0 || (value & ~static_cast<intmax_t>(kShapeMask)))
+          return SignalError(environment, "Invalid IME conversion mode bits");
+        request.value = static_cast<LONG>(value);
+      }
+    } else
+      return SignalError(environment,
+                         "Invalid neo-ime control command or arguments");
+    if (environment->non_local_exit_check(environment) !=
+        emacs_funcall_exit_return)
+      return nullptr;
+    if (!SendTsfRequest(*state, request))
+      return SignalError(environment, "IME window is no longer available");
+    if (FAILED(request.result)) {
+      if (request.operation == TsfOperation::kStart)
+        return environment->intern(environment, "nil");
+      if (request.operation == TsfOperation::kGetOpen)
+        return environment->intern(environment, "unknown");
+      if (request.operation == TsfOperation::kGetConversion)
+        return environment->intern(environment, "nil");
+      char message[kErrorMessageCapacity];
+      std::snprintf(message, sizeof(message),
+                    "IME operation failed (HRESULT 0x%08lx)",
+                    static_cast<unsigned long>(request.result));
+      return SignalError(environment, message);
+    }
+    if (request.operation == TsfOperation::kRead)
+      return MakeTsfRead(environment, request);
+    if (request.operation == TsfOperation::kGetOpen)
+      return environment->intern(environment, request.value ? "on" : "off");
+    if (request.operation == TsfOperation::kGetConversion)
+      return environment->make_integer(environment, request.value);
+    return environment->intern(environment, "t");
+  } catch (const std::bad_alloc&) {
+    return SignalError(environment, "Cannot allocate IME session data");
+  }
 }
 
 using NativeFunction = emacs_function;
@@ -1025,6 +1362,10 @@ extern "C" __declspec(dllexport) int emacs_module_init(
       "Return [revision text utf16-cursor attributes composing "
       "candidates selection page-start total] for HWND.\n"
       "With optional REVISION, return nil if unchanged.");
+  neo_ime::BindFunction(
+      environment, "neo-ime-native-control", 2, 5, neo_ime::NativeControl,
+      "Run COMMAND on HWND's GUI thread. Commands: "
+      "start/read/reset/ack/cancel/reconvert/open/conversion.");
   emacs_value feature = environment->intern(environment, "neo-ime-native");
   environment->funcall(environment, environment->intern(environment, "provide"),
                        1, &feature);

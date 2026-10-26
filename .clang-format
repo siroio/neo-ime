@@ -3,11 +3,11 @@ Language: Cpp
 Standard: c++20
 IncludeCategories:
   # Win32 dependent headers require windows.h first.
-  - Regex: '^"neo_ime_native.h"$'
+  - Regex: '^"(neo_ime_native|tsf_text_store|tsf_backend|tsf_compat).h"$'
     Priority: 0
   - Regex: '^<windows.h>$'
     Priority: 1
-  - Regex: '^<(commctrl|imm).h>$'
+  - Regex: '^<(commctrl|imm|msctf|textstor|olectl).h>$'
     Priority: 2
   - Regex: '^<.*>$'
     Priority: 3

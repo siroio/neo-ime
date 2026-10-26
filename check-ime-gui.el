@@ -3,10 +3,11 @@
 (require 'cl-lib)
 (require 'package)
 (defvar neo-ime-candidate-backend)
+(defvar neo-ime-input-backend)
 (defconst neo-ime-check-root (file-name-directory load-file-name))
 (setq native-comp-jit-compilation nil)
 (defun neo-ime-gui-check ()
- (let* ((user-emacs-directory (make-temp-file "neo-ime-install-" t))
+ (let* ((user-emacs-directory (make-temp-file (expand-file-name "var/neo-ime-install-" neo-ime-check-root) t))
        (package-user-dir (expand-file-name "elpa" user-emacs-directory))
        (package-archives nil)
        (package-check-signature nil)
@@ -14,8 +15,9 @@
   (unwind-protect
       (progn
         (package-initialize)
-        (package-install-file (expand-file-name "var/neo-ime-0.1.4.tar" neo-ime-check-root))
+        (package-install-file (expand-file-name "var/neo-ime-0.2.0.tar" neo-ime-check-root))
         (require 'neo-ime)
+        (setq neo-ime-input-backend 'imm32)
         (cl-assert (file-in-directory-p (locate-library "neo-ime") package-user-dir))
         (cl-assert (file-exists-p neo-ime-native-file))
         (setq frame (make-frame '((window-system . w32) (visibility . nil))))

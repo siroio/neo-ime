@@ -22,6 +22,27 @@ int g_invalid_candidate = 0;
 HANDLE g_window_ready = nullptr;
 bool g_ime_open = false;
 bool g_no_context = false;
+DWORD g_conversion_mode = IME_CMODE_ROMAN | IME_CMODE_FULLSHAPE;
+DWORD g_sentence_mode = IME_SMODE_PHRASEPREDICT;
+
+BOOL FakeSetOpenStatus(HIMC, BOOL open) {
+  assert(GetCurrentThreadId() ==
+         GetWindowThreadProcessId(g_test_window, nullptr));
+  g_ime_open = open != FALSE;
+  return TRUE;
+}
+BOOL FakeGetConversion(HIMC, DWORD* conversion, DWORD* sentence) {
+  *conversion = g_conversion_mode;
+  *sentence = g_sentence_mode;
+  return TRUE;
+}
+BOOL FakeSetConversion(HIMC, DWORD conversion, DWORD sentence) {
+  assert(GetCurrentThreadId() ==
+         GetWindowThreadProcessId(g_test_window, nullptr));
+  g_conversion_mode = conversion;
+  g_sentence_mode = sentence;
+  return TRUE;
+}
 
 HIMC FakeGetContext(HWND window) {
   return g_no_context ? nullptr : ImmGetContext(window);
@@ -135,6 +156,9 @@ LONG FakeComposition(HIMC, DWORD kind, LPVOID output, DWORD byte_capacity) {
 #define ImmSetCompositionWindow FakeSetComposition
 #define ImmGetContext FakeGetContext
 #define ImmGetOpenStatus FakeOpenStatus
+#define ImmSetOpenStatus FakeSetOpenStatus
+#define ImmGetConversionStatus FakeGetConversion
+#define ImmSetConversionStatus FakeSetConversion
 #define DefWindowProcW FakeDefault
 #include "neo_ime_native.cc"
 
@@ -280,6 +304,32 @@ void CheckOpenStatus(neo_ime::WindowState& state) {
   state.use_native_fallback = false;
   g_ime_open = false;
 }
+
+void CheckControls(neo_ime::WindowState& state) {
+  neo_ime::TsfRequest request;
+  const auto execute = [&] {
+    state.tsf_request = &request;
+    SendMessageW(g_test_window, neo_ime::g_control_message,
+                 reinterpret_cast<WPARAM>(&neo_ime::g_control_cookie),
+                 static_cast<LPARAM>(neo_ime::ControlOperation::kTsfRequest));
+    state.tsf_request = nullptr;
+    return request.result;
+  };
+  request.operation = neo_ime::TsfOperation::kSetOpen;
+  request.value = TRUE;
+  assert(execute() == S_OK && g_ime_open);
+  request.value = FALSE;
+  assert(execute() == S_OK && !g_ime_open);
+  request.operation = neo_ime::TsfOperation::kSetConversion;
+  request.value = IME_CMODE_NATIVE | IME_CMODE_KATAKANA;
+  assert(execute() == S_OK);
+  assert(g_conversion_mode ==
+         (IME_CMODE_ROMAN | IME_CMODE_NATIVE | IME_CMODE_KATAKANA));
+  assert(g_sentence_mode == IME_SMODE_PHRASEPREDICT);
+  g_no_context = true;
+  assert(FAILED(execute()));
+  g_no_context = false;
+}
 }  // namespace
 
 int main() {
@@ -295,6 +345,7 @@ int main() {
   neo_ime::WindowState* state = neo_ime::FindState(g_test_window);
   assert(state && state->is_alive);
   CheckOpenStatus(*state);
+  CheckControls(*state);
   CheckComposition(*state);
   assert(neo_ime::DetachWindow(g_test_window));
   assert(!neo_ime::FindState(g_test_window));
