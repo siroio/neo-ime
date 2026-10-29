@@ -55,7 +55,7 @@ Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'check-ime-status.el') -Destinat
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'benchmark-ime.el') -Destination $packageRoot
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'check-ime-gui.el') -Destination $packageRoot
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'check-ime-minibuffer.el') -Destination $packageRoot
-foreach ($file in @('check-ime-tsf.el', 'check-ime-tsf-gui.el', 'check-ime-tsf-input.el', 'check-ime-evil.el', 'check-ime-evil-gui.el')) {
+foreach ($file in @('check-ime-tsf.el', 'check-ime-tsf-gui.el', 'check-ime-tsf-input.el', 'check-ime-evil.el', 'check-ime-evil-gui.el', 'check-ime-update.el', 'check-ime-update-gui.el')) {
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot $file) -Destination $packageRoot
 }
 @'

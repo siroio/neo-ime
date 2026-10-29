@@ -15,7 +15,7 @@
          (neo-ime-cursor-color-on nil) (neo-ime-cursor-color-off nil)
          (status 'on) (cancelled nil) (reject-close nil))
      (cl-letf (((symbol-function 'window-system) (lambda (&optional _) 'w32))
-               ((symbol-function 'module-load) #'ignore)
+               ((symbol-function 'neo-ime--load-native) #'ignore)
                ((symbol-function 'neo-ime-native-attach) #'ignore)
                ((symbol-function 'neo-ime-native-detach) #'ignore)
                ((symbol-function 'neo-ime-native-position) #'ignore)

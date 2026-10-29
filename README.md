@@ -78,7 +78,29 @@ Corfu・Verticoの内部描画APIを使うため、更新で互換性が変わ�
 候補子フレームにはタブバー・タブ行を表示しません。
 `neo-ime-poll-interval` は初期値0.02秒です。変更後はmodeを再起動してください。
 未変更のスナップショットはネイティブ側でコピーを省き、カーソル・候補だけの更新では
-未確定文字のfaceを付け直しません。LispとDLLを更新した後はEmacsを再起動してください。
+未確定文字のfaceを付け直しません。
+
+## 更新とDLLキャッシュ
+
+Git経由で導入した場合は `M-x package-vc-upgrade RET neo-ime RET` で更新します。
+有効化中のneo-imeをいったん停止し、Lispの再構築後に新版のDLLで再開するため、
+通常の更新でEmacsを再起動する必要はありません。無効化中ならその状態を保ちます。
+変換中の切替は拒否します。文字を確定または取り消してから更新を再実行してください。
+再構築やDLLの初期化に失敗した場合は無効状態に留め、更新エラーを表示します。
+
+DLLはパッケージ内の配布ファイルから、`user-emacs-directory` 配下の
+`neo-ime/native/neo-ime-native-<SHA-256>.dll` にコピーして読み込みます。
+配布ファイルをロックしないため、Emacs起動中にも置き換えられます。
+キャッシュは内容を検証し、同じDLLのコピーを再利用します。
+
+旧DLLは実行中のEmacsが終了するまで保持します。**再起動後、neo-imeを初めて
+有効にしたときに、現行版以外の古いキャッシュDLLを削除します。**
+別のEmacsが使用中などで削除できないDLLは残し、次回起動時に再び整理します。
+削除対象はneo-imeの規則に一致するキャッシュファイルだけで、配布元のDLL、
+無関係なファイル、ディレクトリ、シンボリックリンクは削除しません。
+
+この仕組みの導入前に配布元DLLを直接読み込んでいるEmacsは、そのロックを保持しています。
+最初の移行時だけは、そのEmacsを終了してから更新・起動してください。
 
 ## IME状態とカーソル色
 
@@ -113,7 +135,7 @@ Windows側の通知を既存タイマーで取り込み、通常は`neo-ime-poll
 (add-hook 'neo-ime-status-change-hook #'my-ime-status-changed)
 ```
 
-この機能を使うにはLispと同梱DLLを両方更新し、Emacsを再起動してください。
+この機能を使うにはLispと同梱DLLを両方更新してください。
 
 ## ビルド
 
@@ -126,7 +148,9 @@ EmacsとMinGWのg++をPATHに用意し、リポジトリのルートで実行し
 DLLと、DLL・Lisp・nativeソース・手順・ライセンスを含む `var/neo-ime-0.2.1.tar` を生成します。
 Emacsヘッダーの場所はEmacs自身から検出します。
 検出を上書きする場合は `-EmacsRoot 'C:/path/to/emacs'` を指定してください。
-DLLをロード済みなら、再ビルド前にそのEmacsを終了してください。
+キャッシュ方式で有効化したEmacsでは、起動中でも配布DLLを再ビルドできます。
+手動ビルド後は `neo-ime-mode` をOFF→ONにして新しいDLLを読み込んでください。
+配布DLLを直接ロードした古いEmacsやテストプロセスがある場合は、先に終了してください。
 
 native実装はC++20です。[Google C++ Style Guide](https://google.github.io/styleguide/cppguide.html)
 に基づき、`.clang-format` で整形します。Win32ヘッダーには依存順序があるため、
@@ -145,6 +169,8 @@ emacs.exe -Q --batch --eval '(setq load-prefer-newer t)' -l check-ime.el
 emacs.exe -Q --batch --eval '(setq load-prefer-newer t)' -l check-ime-performance.el
 emacs.exe -Q --batch --eval '(setq load-prefer-newer t)' -l check-ime-status.el
 emacs.exe -Q --batch --eval '(setq load-prefer-newer t)' -l check-ime-tsf.el
+emacs.exe -Q --batch -l check-ime-update.el
+emacs.exe -Q -l "$PWD/check-ime-update-gui.el"
 g++ -std=c++20 -O2 -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Werror -fno-rtti -static -o var/check-ime-native.exe native/check_ime_native.cc native/tsf_text_store.cc native/tsf_backend.cc -limm32 -lcomctl32 -lole32 -loleaut32 -luuid
 .\var\check-ime-native.exe
 g++ -std=c++20 -O2 -Wall -Wextra -Werror -static -o var/check-tsf-store.exe native/check_tsf_store.cc native/tsf_text_store.cc -lole32 -luuid
@@ -158,6 +184,10 @@ emacs.exe -Q -L C:/path/to/corfu -L C:/path/to/vertico -l "$PWD/check-ime-minibu
 `var/` とtarを用意するため、GUI検証の前にビルドを実行してください。
 GUI検証は専用のEmacsプロセスを起動して自動終了します。
 結果は `var/check-ime-gui.log` に書き込みます。
+更新検証はビルド不要です。`check-ime-update.el` は実DLLを使う独立したEmacsプロセスで
+新版切替・旧版保持・次回起動時の削除を確認します。`check-ime-update-gui.el` は
+隔離した設定で実際のpackage-vc再構築と複数GUIフレームの再接続を行い、
+結果を `var/check-ime-update-gui.log` に書き込みます。
 ミニバッファ検証には導入済みCorfu・Verticoをload-pathに追加してください。
 結果は `var/check-ime-minibuffer.log` に書き込みます。
 
@@ -245,7 +275,7 @@ emacs.exe -Q -L C:/path/to/evil -L C:/path/to/goto-chg -l check-ime-evil-gui.el
 `native/tsf_text_store.*` が文書とロック、`native/tsf_backend.*` がGUIスレッドの
 TSF寿命・キー・候補・制御を担当します。`native/tsf_compat.h` はMinGWに不足する
 Windows SDKのABI宣言だけを補います。`neo-ime-tsf.el` が世代付きセッション・Undo・公開コマンドです。
-Lisp/DLL/`neo-ime-tsf.el` は一緒に更新し、Emacsを再起動してください。
+Lisp/DLL/`neo-ime-tsf.el` は一緒に更新してください。Git経由の更新は上記の更新手順で再有効化します。
 
 TSFの単体テストと専用Emacsでの初期化・解除、複数フレーム、ミニバッファへの入力先切替を検証しています。
 今回の自動実行環境では最前面ウィンドウを取得できず、実キー入力によるTSF変換・再変換は未検証です。

@@ -51,6 +51,92 @@ and uses its popup renderer only; the IME still selects and commits text."
   "Path to the trusted companion DLL, compiled for this Emacs architecture."
   :type 'file :group 'neo-ime)
 
+(defvar neo-ime--loaded-native-file nil "Native DLL copy loaded in this process.")
+(defvar neo-ime--native-cache-cleaned nil "Whether startup cleanup has run.")
+(defvar neo-ime--frames nil "Attached frames and last seen snapshot revisions.")
+(defconst neo-ime--native-functions
+  '(neo-ime-native-attach neo-ime-native-detach neo-ime-native-position
+    neo-ime-native-cancel neo-ime-native-status neo-ime-native-snapshot
+    neo-ime-native-control))
+
+(defun neo-ime--cache-native-file ()
+  "Return a verified, content-addressed copy of `neo-ime-native-file'."
+  (let ((directory (locate-user-emacs-file "neo-ime/native/")))
+    (dolist (relative '("neo-ime" "neo-ime/native"))
+      (when (file-symlink-p (locate-user-emacs-file relative))
+        (error "neo-ime: native cache must not contain a symlink")))
+    (make-directory directory t)
+    (with-temp-buffer
+      (set-buffer-multibyte nil)
+      (insert-file-contents-literally neo-ime-native-file)
+      (let* ((hash (secure-hash 'sha256 (current-buffer)))
+             (file (expand-file-name (concat "neo-ime-native-" hash ".dll") directory)))
+        (unless (file-exists-p file)
+          (let ((temporary (make-temp-file (expand-file-name ".copy-" directory))))
+            (unwind-protect
+                (progn
+                  (let ((coding-system-for-write 'no-conversion))
+                    (write-region (point-min) (point-max) temporary nil 'silent))
+                  (condition-case nil
+                      (rename-file temporary file)
+                    (file-already-exists nil)))
+              (when (file-exists-p temporary) (delete-file temporary)))))
+        (unless (and (not (file-symlink-p file)) (file-regular-p file))
+          (error "neo-ime: invalid native cache file: %s" file))
+        (erase-buffer)
+        (insert-file-contents-literally file)
+        (unless (equal hash (secure-hash 'sha256 (current-buffer)))
+          (error "neo-ime: native cache contents do not match: %s" file))
+        file))))
+
+(defun neo-ime--clean-native-cache (current)
+  "Remove obsolete cache DLLs, preserving CURRENT and files still in use."
+  (condition-case nil
+      (dolist (file (directory-files
+                    (file-name-directory current) t
+                    "\\`neo-ime-native-[0-9a-f]\\{64\\}\\.dll\\'"))
+        (when (and (not (equal file current))
+                   (not (file-symlink-p file)) (file-regular-p file))
+          (condition-case nil (delete-file file) (file-error nil))))
+    (file-error nil)))
+
+(defun neo-ime--load-native ()
+  "Load the current native copy after all old frame callbacks have stopped."
+  (let ((file (neo-ime--cache-native-file)))
+    (unless (equal file neo-ime--loaded-native-file)
+      (when neo-ime--frames
+        (error "neo-ime: detach all frames before replacing the native module"))
+      (let ((previous (mapcar (lambda (symbol) (cons symbol (symbol-function symbol)))
+                              neo-ime--native-functions))
+            (provided (featurep 'neo-ime-native))
+            (loaded nil))
+        (unwind-protect
+            (progn
+              (condition-case error-data
+                  (module-load file)
+                (module-open-failed
+                 (if (file-exists-p file)
+                     (signal (car error-data) (cdr error-data))
+                   ;; Another Emacs may have pruned the copy before it was locked.
+                   (setq file (neo-ime--cache-native-file))
+                   (module-load file))))
+              (unless (and (featurep 'neo-ime-native)
+                           (cl-every (lambda (entry)
+                                       (and (fboundp (car entry))
+                                            (not (eq (cdr entry)
+                                                     (symbol-function (car entry))))))
+                                     previous))
+                (error "neo-ime: native module did not register the complete API"))
+              (setq neo-ime--loaded-native-file file loaded t))
+          (unless loaded
+            (dolist (entry previous)
+              (if (cdr entry) (fset (car entry) (cdr entry)) (fmakunbound (car entry))))
+            (unless provided (setq features (delq 'neo-ime-native features)))))))
+    ;; Loaded copies cannot be unloaded safely; retain them until process exit.
+    (unless neo-ime--native-cache-cleaned
+      (setq neo-ime--native-cache-cleaned t)
+      (neo-ime--clean-native-cache file))))
+
 (declare-function neo-ime-native-attach "neo-ime-native" (hwnd))
 (declare-function neo-ime-native-detach "neo-ime-native" (hwnd))
 (declare-function neo-ime-native-snapshot "neo-ime-native" (hwnd &optional revision))
@@ -61,6 +147,8 @@ and uses its popup renderer only; the IME still selects and commits text."
 (declare-function corfu--popup-hide "corfu" ())
 (declare-function vertico--display-candidates "vertico" (lines))
 (declare-function vertico--exhibit "vertico" ())
+(declare-function package-desc-name "package" (descriptor))
+(declare-function package-vc--main-file "package-vc" (descriptor))
 (defvar corfu-min-width)
 (defvar corfu-max-width)
 (defvar vertico--candidates-ov)
@@ -72,7 +160,6 @@ and uses its popup renderer only; the IME still selects and commits text."
   '(evil-normal-state-entry-hook evil-visual-state-entry-hook
     evil-motion-state-entry-hook evil-operator-state-entry-hook))
 
-(defvar neo-ime--frames nil "Attached frames and last seen snapshot revisions.")
 (defvar neo-ime--timer nil)
 (defvar neo-ime--overlay nil)
 (defvar neo-ime--owner nil "Frame owning the current preedit text.")
@@ -502,6 +589,29 @@ before passing it to `posn-at-x-y', which requires a nonnegative Y."
     (delete-frame neo-ime--candidate-frame t))
   (setq neo-ime--candidate-frame nil))
 
+(defun neo-ime--package-vc-rebuild (rebuild descriptor &rest arguments)
+  "Stop neo-ime before REBUILD reloads its Lisp, then enable the new version."
+  (let ((resume (and (eq (package-desc-name descriptor) 'neo-ime) neo-ime-mode)))
+    (when resume
+      (when (or neo-ime--overlay
+                (cl-some (lambda (entry) (neo-ime--tsf-session-composing (cdr entry)))
+                         neo-ime--tsf-sessions)
+                (cl-some (lambda (entry)
+                           (let ((state (neo-ime-native-snapshot (neo-ime--hwnd (car entry)))))
+                             (and state (aref state 4))))
+                         neo-ime--frames))
+        (user-error "Finish IME composition before updating neo-ime"))
+      (neo-ime-mode -1))
+    (prog1 (apply rebuild descriptor arguments)
+      (when resume
+        ;; package.el demotes load errors; require a complete load before resuming.
+        (let ((directory (file-name-directory (package-vc--main-file descriptor))))
+          (dolist (library '("neo-ime-tsf" "neo-ime"))
+            (load (expand-file-name library directory) nil t)))
+        (neo-ime-mode 1)))))
+
+(advice-add 'package-vc--unpack-1 :around #'neo-ime--package-vc-rebuild)
+
 
 ;;;###autoload
 (define-minor-mode neo-ime-mode
@@ -521,9 +631,7 @@ It does not select an IME or change `default-input-method'."
             ('corfu (neo-ime--require-corfu))
             ('child-frame nil)
             (_ (user-error "Invalid neo-ime-candidate-backend: %S" neo-ime-candidate-backend)))
-          (unless (featurep 'neo-ime-native) (module-load neo-ime-native-file))
-          (unless (and (fboundp 'neo-ime-native-status) (fboundp 'neo-ime-native-control))
-            (user-error "Update neo-ime-native.dll and restart Emacs"))
+          (unless neo-ime--frames (neo-ime--load-native))
           (dolist (frame (frame-list)) (neo-ime--attach frame))
           (add-hook 'after-make-frame-functions #'neo-ime--attach)
           (add-hook 'delete-frame-functions #'neo-ime--detach)
