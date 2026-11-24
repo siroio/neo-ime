@@ -156,6 +156,13 @@ and uses its popup renderer only; the IME still selects and commits text."
 (defvar vertico-resize)
 (defvar evil-local-mode)
 (defvar evil-state)
+(defvar neo-ime-mode)
+(defvar evil-next-state)
+(defcustom neo-ime-evil-restore-modes '(org-mode markdown-mode)
+  "Major modes where returning to Evil Insert restores the last IME state.
+Derived modes are included.  Set to nil to disable restoration."
+  :type '(repeat symbol) :group 'neo-ime)
+(defvar neo-ime--evil-saved-states (make-hash-table :test 'eq :weakness 'key))
 (defconst neo-ime--evil-state-hooks
   '(evil-normal-state-entry-hook evil-visual-state-entry-hook
     evil-motion-state-entry-hook evil-operator-state-entry-hook))
@@ -179,6 +186,23 @@ The result describes IME open status, not hiragana/katakana conversion mode."
   (if (and (frame-live-p frame) (assq frame neo-ime--frames))
       (or (frame-parameter frame 'neo-ime--status) 'unknown)
     'unknown))
+
+;;;###autoload
+(defun neo-ime-describe-frame (&optional frame)
+  "Show FRAME's active input backend, candidate renderer and Windows IME state."
+  (interactive)
+  (let* ((frame (or frame (selected-frame)))
+         (active (and neo-ime-mode (assq frame neo-ime--frames)))
+         (backend (cond ((not active) 'inactive)
+                        ((frame-parameter frame 'neo-ime--tsf) 'tsf)
+                        (t 'imm32)))
+         (status (if active
+                     (condition-case nil (neo-ime--control frame 'open) (error 'unknown))
+                   'unknown)))
+    (with-help-window "*neo-ime diagnostics*"
+      (princ (format "Frame: %s\nInput setting: %s\nActive input: %s\nCandidate renderer (configured): %s\nIME state: %s\n"
+                     (frame-parameter frame 'name) neo-ime-input-backend backend
+                     neo-ime-candidate-backend status)))))
 
 (defun neo-ime--update-status (frame status)
   "Publish STATUS for FRAME and apply its configured cursor color."
@@ -494,6 +518,29 @@ before passing it to `posn-at-x-y', which requires a nonnegative Y."
   (setq neo-ime--tsf-sessions (assq-delete-all frame neo-ime--tsf-sessions))
   (when (eq frame neo-ime--owner) (neo-ime--clear)))
 
+(defun neo-ime--evil-restore-eligible-p ()
+  (and neo-ime-mode (assq (selected-frame) neo-ime--frames)
+       (bound-and-true-p evil-local-mode) (not (minibufferp))
+       (eq (current-buffer) (window-buffer (selected-window)))
+       neo-ime-evil-restore-modes (apply #'derived-mode-p neo-ime-evil-restore-modes)))
+
+(defun neo-ime--evil-leave-insert ()
+  (remhash (current-buffer) neo-ime--evil-saved-states)
+  (when (and (memq (bound-and-true-p evil-next-state) '(normal visual motion operator))
+             (neo-ime--evil-restore-eligible-p))
+    (let ((state (ignore-errors (neo-ime--control (selected-frame) 'open))))
+      (when (memq state '(on off))
+        (puthash (current-buffer) state neo-ime--evil-saved-states)))))
+
+(defun neo-ime--evil-enter-insert ()
+  (let ((target (gethash (current-buffer) neo-ime--evil-saved-states)))
+    (remhash (current-buffer) neo-ime--evil-saved-states)
+    (when (and target (neo-ime--evil-restore-eligible-p))
+      (condition-case err
+          (unless (eq target (neo-ime--control (selected-frame) 'open))
+            (if (eq target 'on) (neo-ime-open) (neo-ime-close)))
+        (error (display-warning 'neo-ime (error-message-string err) :warning))))))
+
 (defun neo-ime--evil-sync ()
   "Close the native IME in the selected buffer's Evil command states."
   (when (and neo-ime-mode (assq (selected-frame) neo-ime--frames)
@@ -576,6 +623,9 @@ before passing it to `posn-at-x-y', which requires a nonnegative Y."
   (remove-hook 'post-command-hook #'neo-ime--after-command)
   (dolist (hook neo-ime--evil-state-hooks)
     (remove-hook hook #'neo-ime--evil-sync))
+  (remove-hook 'evil-insert-state-exit-hook #'neo-ime--evil-leave-insert)
+  (remove-hook 'evil-insert-state-entry-hook #'neo-ime--evil-enter-insert)
+  (clrhash neo-ime--evil-saved-states)
   (remove-hook 'kill-emacs-hook #'neo-ime--stop)
   (remove-hook 'before-save-hook #'neo-ime--before-save)
   (remove-hook 'auto-save-hook #'neo-ime--before-save)
@@ -639,6 +689,8 @@ It does not select an IME or change `default-input-method'."
           (add-hook 'post-command-hook #'neo-ime--after-command)
           (dolist (hook neo-ime--evil-state-hooks)
             (add-hook hook #'neo-ime--evil-sync))
+          (add-hook 'evil-insert-state-exit-hook #'neo-ime--evil-leave-insert)
+          (add-hook 'evil-insert-state-entry-hook #'neo-ime--evil-enter-insert)
           (add-hook 'kill-emacs-hook #'neo-ime--stop)
           (add-hook 'before-save-hook #'neo-ime--before-save)
           (add-hook 'auto-save-hook #'neo-ime--before-save)

@@ -124,4 +124,37 @@
     (should (eq evil-state 'normal))
     (should (eq status 'unknown))))
 
+(ert-deftest neo-ime-evil-remembers-only-the-selected-writing-buffer ()
+  (neo-ime-evil-check
+    (let ((neo-ime-evil-restore-modes '(fundamental-mode))
+          (writing (current-buffer)))
+      (evil-insert-state)
+      (setq status 'on)
+      (evil-normal-state)
+      (should (eq status 'off))
+      (with-temp-buffer
+        (switch-to-buffer (current-buffer))
+        (evil-local-mode 1)
+        (evil-insert-state)
+        (should (eq status 'off)))
+      (switch-to-buffer writing)
+      (evil-insert-state)
+      (should (eq status 'on))
+      (setq status 'off)
+      (evil-normal-state)
+      (setq status 'on)
+      (evil-insert-state)
+      (should (eq status 'off)))))
+
+(ert-deftest neo-ime-diagnostics-report-effective-frame-backend ()
+  (neo-ime-evil-check
+    (let ((neo-ime-input-backend 'auto))
+      (dolist (actual '(nil t))
+        (set-frame-parameter nil 'neo-ime--tsf actual)
+        (neo-ime-describe-frame)
+        (with-current-buffer "*neo-ime diagnostics*"
+          (should (string-match-p (if actual "Active input: tsf" "Active input: imm32")
+                                  (buffer-string)))
+          (should (string-match-p "IME state: off" (buffer-string))))))))
+
 (ert-run-tests-batch-and-exit)
